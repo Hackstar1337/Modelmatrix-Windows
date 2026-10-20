@@ -395,5 +395,5 @@ export function isActive(job: HFDownload) {
 }
 
 export function targetName(host?: string) {
-  return host ? host : "this Mac";
+  return host ? host : "this device";
 }

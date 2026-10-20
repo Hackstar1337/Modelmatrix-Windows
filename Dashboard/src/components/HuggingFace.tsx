@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, Download, ExternalLink, Loader2, Lock, RefreshCw, Search, ShieldCheck, Wrench, XCircle } from "lucide-react";
 import { compact } from "../lib/format";
 import { contextLabel, fitWords, hf, size, type HFCheckReport, type HFEngineId, type HFEngineJob, type HFEnginePlan, type HFVariant } from "../lib/hf";
-import { useApp } from "../lib/state";
+import { useApp, usePlatform } from "../lib/state";
 import type { Gateway } from "../lib/types";
 import { CopyButton, Modal, Notice } from "./ui";
 
@@ -73,6 +73,7 @@ function kindDescription(task: NonNullable<HFCheckReport["task"]>): string {
 
 function AddModelModal({ initial, onClose }: { initial: { name?: string; host?: string }; onClose: () => void }) {
   const { toast, setPage } = useApp();
+  const { localHostLabel } = usePlatform();
   const hosts = useRemoteHosts();
   const [host, setHost] = useState(initial.host ?? "");
   const [name, setName] = useState(initial.name ?? "");
@@ -128,7 +129,7 @@ function AddModelModal({ initial, onClose }: { initial: { name?: string; host?: 
   const canDownload = !!report && report.kind === "model" && report.download_available && !!variant && variant.supported && !loginNeeded;
   const memoryWarning = variant?.fit?.level === "too_big";
   const qualityWarning = variant?.bits_per_weight !== undefined && variant.bits_per_weight < LOW_QUALITY_BITS;
-  const where = host || "this Mac";
+  const where = host || localHostLabel;
 
   const startDownload = async () => {
     if (!report?.repo || !variant) return;
@@ -177,7 +178,7 @@ function AddModelModal({ initial, onClose }: { initial: { name?: string; host?: 
             <span className="label">Where to run it</span>
             <div className="seg sm">
               <button className={host === "" ? "on" : ""} onClick={() => (setHost(""), report && recheck({ host: "" }))}>
-                This Mac
+                {localHostLabel}
               </button>
               {hosts.map((g) => (
                 <button key={g.id} className={host === g.name ? "on" : ""} onClick={() => (setHost(g.name), report && recheck({ host: g.name }))}>
@@ -358,6 +359,7 @@ function VerdictBanner({ report }: { report: HFCheckReport }) {
 
 function Facts({ report }: { report: HFCheckReport }) {
   const { repo, format, task, model, machine } = report;
+  const { localHostLabel } = usePlatform();
   return (
     <dl className="kv hf-facts">
       {repo && (
@@ -407,7 +409,7 @@ function Facts({ report }: { report: HFCheckReport }) {
           <dd className="hf-plain">{repo.license ?? "Not stated"}</dd>
         </>
       )}
-      <dt>{machine.host_name ? "Host" : "This Mac"}</dt>
+      <dt>{machine.host_name ? "Host" : localHostLabel}</dt>
       <dd className="hf-plain">
         {machine.host_name ? `${machine.host_name}: ` : ""}
         {machine.chip ?? machine.architecture}, {size(machine.memory_bytes)} memory, about {size(machine.budget_bytes)} usable for models
@@ -626,6 +628,7 @@ export function EngineInstallDialog({
   onDone?: () => void;
 }) {
   const { toast } = useApp();
+  const { localHostLabel } = usePlatform();
   const [plan, setPlan] = useState<HFEnginePlan>();
   const [error, setError] = useState<string>();
   const [job, setJob] = useState<HFEngineJob>();
@@ -633,7 +636,7 @@ export function EngineInstallDialog({
   const [busy, setBusy] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
   const verb = action === "install" ? "Install" : action === "update" ? "Update" : "Remove";
-  const where = host ?? "this Mac";
+  const where = host ?? localHostLabel;
 
   useEffect(() => {
     let cancelled = false;

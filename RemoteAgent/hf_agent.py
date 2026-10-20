@@ -28,6 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any, Callable
 
@@ -45,6 +46,11 @@ MAX_UNPACKED_BYTES = 8 * GIB
 LLAMA_URL_RE = re.compile(
     r"^https://github\.com/ggml-org/llama\.cpp/releases/download/b[0-9]{1,7}/"
     r"(?:cudart-)?llama-b[0-9]{1,7}-bin-[a-z0-9.-]+\.tar\.gz$"
+)
+WINDOWS_LLAMA_URL_RE = re.compile(
+    r"^https://github\.com/ggml-org/llama\.cpp/releases/download/b[0-9]{1,7}/"
+    r"(?:cudart-)?llama-b[0-9]{1,7}-bin-(?:win|windows)(?:-[a-z0-9._]+)*-?(?:x64|amd64|arm64)\.zip$",
+    re.IGNORECASE,
 )
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 JOB_ID_RE = re.compile(r"^(?:dl|eng)-[a-z0-9]{6,32}$")
@@ -286,6 +292,63 @@ class HostFacts:
             "engines_folder": str(paths.engines),
             "free_disk_bytes": free_disk_bytes(paths.models),
             "hf_api": HF_API_VERSION,
+        }
+
+
+class WindowsHostFacts(HostFacts):
+    """Windows host facts with conservative, injectable hardware discovery."""
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        kwargs.setdefault("system", "Windows")
+        super().__init__(*args, **kwargs)
+
+    def memory(self) -> tuple[int, int | None]:
+        if self.system != "windows":
+            return super().memory()
+        try:
+            import ctypes
+
+            class _Memory(ctypes.Structure):
+                _fields_ = [("length", ctypes.c_ulong), ("memory_load", ctypes.c_ulong),
+                            ("total", ctypes.c_ulonglong), ("available", ctypes.c_ulonglong),
+                            ("pagefile", ctypes.c_ulonglong), ("avail_pagefile", ctypes.c_ulonglong),
+                            ("virtual", ctypes.c_ulonglong), ("avail_virtual", ctypes.c_ulonglong),
+                            ("avail_extended", ctypes.c_ulonglong)]
+
+            info = _Memory()
+            info.length = ctypes.sizeof(_Memory)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(info)):
+                return int(info.total), int(info.available)
+        except (AttributeError, OSError, TypeError):
+            pass
+        return super().memory()
+
+    def amd(self) -> list[dict[str, Any]]:
+        return []
+
+    def os_name(self) -> str:
+        return f"Windows {platform.release()}".strip()
+
+    def cpu_name(self) -> str:
+        return platform.processor() or self.machine
+
+    def payload(self, paths: HFHostPaths) -> dict[str, Any]:
+        total, available = self.memory()
+        nvidia, cuda = self.nvidia()
+        vram = sum(gpu.get("memory_bytes") or 0 for gpu in nvidia)
+        if nvidia and vram:
+            budget, source, accelerator = vram * 9 // 10, "gpu", "cuda"
+        else:
+            budget, source, accelerator = total * 3 // 5, "cpu", "cpu"
+        return {
+            "kind": "windows", "os": self.os_name(), "architecture": self.architecture,
+            "chip": self.cpu_name(), "cores": os.cpu_count() or 1,
+            "memory_bytes": total, "available_memory_bytes": available, "gpus": nvidia,
+            "gpu": _gpu_summary(nvidia, False), "cuda_version": cuda, "vulkan": None,
+            "rocm": None, "glibc": None, "accelerator": accelerator,
+            "budget_bytes": budget, "budget_source": source,
+            "models_folder": str(paths.models), "engines_folder": str(paths.engines),
+            "free_disk_bytes": free_disk_bytes(paths.models), "hf_api": HF_API_VERSION,
         }
 
 
@@ -794,6 +857,237 @@ class EngineInstaller:
         return self.public(job)
 
 
+# MARK: Windows engine installs
+
+
+def _safe_windows_zip_name(name: str) -> str:
+    """Validate a ZIP member and return its normalized slash-separated name."""
+    value = name.replace("\\", "/")
+    parts = value.split("/")
+    reserved = re.compile(r"^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$", re.IGNORECASE)
+    if not value or value.startswith("/") or ":" in parts[0] or any(part in ("", ".", "..") for part in parts):
+        raise HFAgentError(f"The Windows engine archive contains an unsafe path ({name}).")
+    if any(reserved.match(part) for part in parts):
+        raise HFAgentError(f"The Windows engine archive contains a reserved path ({name}).")
+    return "/".join(parts)
+
+
+def safe_extract_zip(archive: Path, destination: Path) -> None:
+    """Extract only regular ZIP files beneath *destination*, with strict limits."""
+    try:
+        with zipfile.ZipFile(archive) as zipped:
+            members = zipped.infolist()
+            if len(members) > 5000:
+                raise HFAgentError(f"{archive.name} has too many files.")
+            total = 0
+            for member in members:
+                name = _safe_windows_zip_name(member.filename)
+                mode = (member.external_attr >> 16) & 0xFFFF
+                if mode and (mode & 0o170000) not in (0, 0o100000, 0o040000):
+                    raise HFAgentError(f"{archive.name} contains a link or special file ({name}).")
+                total += max(0, member.file_size)
+                if total > MAX_UNPACKED_BYTES:
+                    raise HFAgentError(f"{archive.name} unpacks to more than {gb_text(MAX_UNPACKED_BYTES)}.")
+            destination.mkdir(parents=True, exist_ok=True)
+            for member in members:
+                name = _safe_windows_zip_name(member.filename)
+                target = destination / name
+                if member.is_dir() or member.filename.endswith(("/", "\\")):
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zipped.open(member, "r") as source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output, CHUNK_BYTES)
+    except zipfile.BadZipFile as error:
+        raise HFAgentError(f"{archive.name} is not a valid Windows ZIP archive.") from error
+
+
+def _find_windows_program(folder: Path) -> Path | None:
+    for current, folders, files in os.walk(folder):
+        folders[:] = [name for name in folders if not name.startswith(".")]
+        for name in files:
+            if name.lower() == "llama-server.exe":
+                return Path(current) / name
+    return None
+
+
+class WindowsEngineInstaller:
+    """Install official llama.cpp Windows ZIP assets transactionally.
+
+    Plans are produced by ``Windows.LocalHF`` from GitHub release metadata;
+    this class still validates every field so callers cannot turn the installer
+    into an arbitrary URL or command runner.
+    """
+
+    def __init__(self, paths: HFHostPaths, registry: EngineRegistry, finder: Any,
+                 opener: Callable[..., Any] = open_url, run: Callable[..., Any] = run_command,
+                 on_change: Callable[[str], None] | None = None,
+                 in_use: Callable[[str], str | None] | None = None):
+        self.paths, self.registry, self.finder, self.opener, self.run = paths, registry, finder, opener, run
+        self.on_change = on_change or (lambda engine: None)
+        self.in_use = in_use or (lambda folder: None)
+        self.lock = threading.Lock()
+        self.jobs: dict[str, dict[str, Any]] = {}
+        self.order: list[str] = []
+        self.cancelled: set[str] = set()
+
+    @property
+    def folder(self) -> Path:
+        return self.paths.engines / "llama.cpp"
+
+    def _new_job(self, plan: dict[str, Any], action: str) -> dict[str, Any]:
+        job_id = str(plan.get("job_id") or f"eng-{uuid.uuid4().hex[:12]}")
+        if not JOB_ID_RE.match(job_id):
+            raise HFAgentError("Invalid engine job id.")
+        with self.lock:
+            if any(item["state"] == "running" for item in self.jobs.values()):
+                raise HFAgentError("Wait for the current engine operation to finish first.", 409, "conflict")
+            job = {"id": job_id, "engine": "llama.cpp", "action": action, "method": "official",
+                   "title": f"{'Update' if action == 'update' else 'Install'} llama.cpp for Windows",
+                   "state": "running", "log": [], "log_count": 0, "error": None,
+                   "started_at": now_text(), "finished_at": None, "path": None, "version": plan.get("version")}
+            self.jobs[job_id] = job
+            self.order.append(job_id)
+            return job
+
+    def _log(self, job: dict[str, Any], line: str) -> None:
+        with self.lock:
+            job["log"].append(str(line)[:500])
+            job["log"] = job["log"][-LOG_LINES:]
+            job["log_count"] += 1
+
+    def public(self, job: dict[str, Any], since: int | None = None) -> dict[str, Any]:
+        with self.lock:
+            result = dict(job)
+            lines = list(job.get("log", []))
+            count = int(job.get("log_count", len(lines)))
+        if since is not None:
+            first = count - len(lines)
+            lines = lines[max(0, since - first):]
+        result["log"] = lines
+        result["next"] = count
+        return result
+
+    def list(self) -> list[dict[str, Any]]:
+        return [self.public(self.jobs[key]) for key in reversed(self.order) if key in self.jobs]
+
+    def job(self, job_id: str) -> dict[str, Any]:
+        job = self.jobs.get(job_id)
+        if not job:
+            raise HFAgentError(f"No engine job with id {job_id}.", 404, "unknown_item")
+        return job
+
+    @staticmethod
+    def validate(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        if payload.get("engine") != "llama.cpp":
+            raise HFAgentError("Only llama.cpp has a verified Windows installer.", 400, "unsupported_platform")
+        archives = payload.get("archives")
+        if not isinstance(archives, list) or len(archives) != 1:
+            raise HFAgentError("A Windows install plan must contain exactly one ZIP archive.")
+        archive = archives[0]
+        if not isinstance(archive, dict):
+            raise HFAgentError("Invalid Windows archive entry.")
+        url, digest, size = archive.get("url"), archive.get("sha256"), archive.get("size")
+        if not isinstance(url, str) or not WINDOWS_LLAMA_URL_RE.match(url):
+            raise HFAgentError("Only official llama.cpp Windows release ZIPs can be installed.")
+        if not isinstance(digest, str) or not SHA256_RE.match(digest.lower()):
+            raise HFAgentError("The Windows archive needs a SHA-256 digest from GitHub.")
+        if not isinstance(size, int) or isinstance(size, bool) or not 0 < size <= MAX_ENGINE_ARCHIVE_BYTES:
+            raise HFAgentError("Invalid Windows archive size.")
+        return [{"url": url, "sha256": digest.lower(), "size": size, "name": url.rsplit("/", 1)[-1]}]
+
+    def start_install(self, payload: dict[str, Any], run_async: bool = True) -> dict[str, Any]:
+        archives = self.validate(payload)
+        old = self.registry.get("llama.cpp")
+        job = self._new_job(payload, "update" if old else "install")
+        if run_async:
+            threading.Thread(target=self._install, args=(job, archives, payload), daemon=True).start()
+        else:
+            self._install(job, archives, payload)
+        return self.public(job)
+
+    def _install(self, job: dict[str, Any], archives: list[dict[str, Any]], plan: dict[str, Any]) -> None:
+        staging = self.paths.engines / f".llama.cpp-new-{job['id']}"
+        backup = self.paths.engines / f".llama.cpp-old-{job['id']}"
+        try:
+            self.paths.engines.mkdir(parents=True, exist_ok=True)
+            shutil.rmtree(staging, ignore_errors=True)
+            staging.mkdir()
+            archive = archives[0]
+            downloaded = staging / archive["name"]
+            self._log(job, f"Downloading {archive['name']} ({gb_text(archive['size'])})")
+            fetch_verified(archive["url"], downloaded, archive["size"], archive["sha256"], self.opener,
+                           lambda: job["id"] in self.cancelled,
+                           lambda done: self._log(job, f"Downloaded {done} of {archive['size']} bytes") if done == archive["size"] else None)
+            self._log(job, "Checksum OK")
+            unpacked = staging / "unpacked"
+            safe_extract_zip(downloaded, unpacked)
+            server = _find_windows_program(unpacked)
+            if server is None:
+                raise HFAgentError("The Windows archive has no llama-server.exe.")
+            final = staging / "llama.cpp"
+            shutil.move(str(server.parent), str(final / "bin"))
+            program = final / "bin" / "llama-server.exe"
+            path_env = dict(os.environ)
+            path_env["PATH"] = str(program.parent) + os.pathsep + path_env.get("PATH", "")
+            code, output = self.run([str(program), "--version"], 60, path_env)
+            if code != 0:
+                raise HFAgentError(f"This llama.cpp Windows build does not run: {(output or '').strip()[-200:]}")
+            version = str(plan.get("version") or "unknown")
+            self._log(job, f"llama-server {version} runs.")
+            if self.folder.exists():
+                os.replace(self.folder, backup)
+            os.replace(final, self.folder)
+            self.registry.set("llama.cpp", {"path": str(self.folder / "bin" / "llama-server.exe"),
+                                             "folder": str(self.folder), "version": version,
+                                             "tag": plan.get("tag"), "build": plan.get("build"),
+                                             "installed_at": now_text(), "method": "official"})
+            shutil.rmtree(backup, ignore_errors=True)
+            self._log(job, f"Installed in {self.folder}")
+            job["path"], job["version"] = str(self.folder / "bin" / "llama-server.exe"), version
+            job["state"] = "succeeded"
+            self.on_change("llama.cpp")
+        except _Stopped:
+            job["state"] = "cancelled"
+            self._log(job, "Cancelled. Nothing was installed.")
+        except (HFAgentError, OSError, zipfile.BadZipFile, urllib.error.HTTPError) as error:
+            message = str(error)
+            job["state"], job["error"] = "failed", message
+            self._log(job, message)
+        finally:
+            job["finished_at"] = now_text()
+            shutil.rmtree(staging, ignore_errors=True)
+            if backup.exists() and not self.folder.exists():
+                os.replace(backup, self.folder)
+            self.cancelled.discard(job["id"])
+
+    def cancel(self, job_id: str) -> None:
+        job = self.job(job_id)
+        if job["state"] == "running":
+            self.cancelled.add(job_id)
+
+    def uninstall(self, job_id: str | None = None) -> dict[str, Any]:
+        record = self.registry.get("llama.cpp")
+        if not record:
+            raise HFAgentError("ModelMatrix did not install llama.cpp on this host.", 409, "conflict")
+        user = self.in_use(str(self.folder))
+        if user:
+            raise HFAgentError(f"Stop {user} first: it is running on llama.cpp.", 409, "conflict")
+        plan = {"job_id": job_id} if job_id else {}
+        job = self._new_job(plan, "uninstall")
+        try:
+            shutil.rmtree(self.folder)
+            self.registry.set("llama.cpp", None)
+            self._log(job, "Removed the ModelMatrix llama.cpp folder.")
+            job["state"] = "succeeded"
+            self.on_change("llama.cpp")
+        except OSError as error:
+            job["state"], job["error"] = "failed", str(error)
+            self._log(job, str(error))
+        job["finished_at"] = now_text()
+        return self.public(job)
+
+
 # MARK: Downloads
 
 
@@ -885,11 +1179,17 @@ class DownloadManager:
         self, paths: HFHostPaths, profiles: "ProfileMaker",
         fetch: Callable[[urllib.request.Request, str | None, float], Any] = fetch_with_token,
         ollama: "OllamaClient | None" = None, sleep_scale: float = 1.0, start_worker: bool = True,
+        token_provider: Callable[[], str | None] | None = None,
     ):
         self.paths = paths
         self.profiles = profiles
         self.fetch = fetch
         self.ollama = ollama or OllamaClient()
+        # Tokens are deliberately not part of a serialized job.  A host adapter
+        # may provide a secure store lookup here so a queued job can resume after
+        # an agent restart without putting credentials in downloads.json.
+        self.token_provider = token_provider
+        self.rate_limit_bytes_per_second: int | None = None
         self.sleep_scale = sleep_scale
         self.file = paths.state / "downloads.json"
         self.lock = threading.RLock()
@@ -1304,7 +1604,10 @@ class DownloadManager:
             if offset:
                 request.add_header("Range", f"bytes={offset}-")
             try:
-                response = self.fetch(request, self.tokens.get(job["id"]), 60)
+                token = self.tokens.get(job["id"])
+                if not token and self.token_provider is not None:
+                    token = self.token_provider()
+                response = self.fetch(request, token, 60)
             except urllib.error.HTTPError as error:
                 if error.code == 416 and offset == size:
                     response = None
@@ -1354,6 +1657,12 @@ class DownloadManager:
                 if offset > file["size"]:
                     raise HFAgentError(f"{file['path']} is larger than Hugging Face said; stopped.")
                 out.write(chunk)
+                limit = self.rate_limit_bytes_per_second
+                if limit and limit > 0:
+                    expected = offset / limit
+                    elapsed_since_start = time.monotonic() - window[0][0]
+                    if expected > elapsed_since_start:
+                        time.sleep(min(expected - elapsed_since_start, 2.0))
                 now = time.monotonic()
                 window.append((now, offset))
                 while len(window) > 2 and now - window[0][0] > 10:

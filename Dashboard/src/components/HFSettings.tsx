@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import { Download, KeyRound, Loader2, RefreshCw, Trash2 } from "lucide-react";
 import { hf, size, type HFEngineId, type HFEngineStatus, type HFSettings } from "../lib/hf";
-import { useApp, usePoll } from "../lib/state";
+import { useApp, usePlatform, usePoll } from "../lib/state";
 import { EngineInstallDialog, useRemoteHosts } from "./HuggingFace";
 import { CopyButton, Notice, SectionCard, Switch } from "./ui";
 
 /** Settings > Hugging Face: models folder, mirror, speed, keep awake, auto start and the login token. */
 export function HuggingFaceSettingsSection() {
   const { toast } = useApp();
+  const { localHostLabel, platform, capabilities } = usePlatform();
   const [settings, setSettings] = useState<HFSettings>();
   const [error, setError] = useState<string>();
   const [folder, setFolder] = useState("");
@@ -57,7 +58,7 @@ export function HuggingFaceSettingsSection() {
         <div>
           <div className="title">Models folder</div>
           <div className="desc">
-            Where downloaded models go on this Mac. {settings.free_disk_bytes ? `${size(settings.free_disk_bytes)} free.` : ""} Remote hosts use their own ~/ModelMatrix/Models.
+            Where downloaded models go on {localHostLabel}. {settings.free_disk_bytes ? `${size(settings.free_disk_bytes)} free.` : ""} Remote hosts use their own model folder.
           </div>
         </div>
         <div className="row">
@@ -115,10 +116,16 @@ export function HuggingFaceSettingsSection() {
       </div>
       <div className="setting-row">
         <div>
-          <div className="title">Keep the Mac awake while downloading</div>
+          <div className="title">Keep {localHostLabel} awake while downloading</div>
           <div className="desc">Stops idle sleep only while a download runs. The display can still turn off.</div>
         </div>
-        <Switch on={settings.keep_awake} onChange={(v) => save({ keep_awake: v }, v ? "Keeps the Mac awake while downloading" : "The Mac may sleep during downloads")} label="Keep awake" />
+        <Switch
+          on={settings.keep_awake}
+          disabled={!capabilities.keep_awake}
+          onChange={(v) => save({ keep_awake: v }, v ? `Keeps ${localHostLabel} awake while downloading` : `${localHostLabel} may sleep during downloads`)}
+          label="Keep awake"
+        />
+        {!capabilities.keep_awake && <div className="hint">Keep awake is not available on {platform.display_name}; the controller will not request it.</div>}
       </div>
       <div className="setting-row">
         <div>
@@ -135,7 +142,7 @@ export function HuggingFaceSettingsSection() {
         <div>
           <div className="title">Hugging Face token</div>
           <div className="desc">
-            Needed only for models that require a login. Stored in the macOS Keychain and sent only to Hugging Face.{" "}
+            Needed only for models that require a login. Stored in the {platform.credential_store} and sent only to Hugging Face.{" "}
             {settings.token_saved ? "A token is saved." : "No token saved."}
           </div>
         </div>
@@ -182,9 +189,10 @@ export function HuggingFaceSettingsSection() {
   );
 }
 
-/** Settings > Engines: what is installed on this Mac or a host, and approve-first install, update and removal. */
+/** Settings > Engines: what is installed on this host or a remote host, and approve-first install, update and removal. */
 export function EnginesSection() {
   const hosts = useRemoteHosts();
+  const { localHostLabel } = usePlatform();
   const [host, setHost] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [dialog, setDialog] = useState<{ engine: HFEngineId; name: string; action: "install" | "update" | "uninstall" } | null>(null);
@@ -215,7 +223,7 @@ export function EnginesSection() {
         {hosts.length > 0 && (
           <div className="seg sm" style={{ alignSelf: "flex-start" }}>
             <button className={host === "" ? "on" : ""} onClick={() => setHost("")}>
-              This Mac
+              {localHostLabel}
             </button>
             {hosts.map((g) => (
               <button key={g.id} className={host === g.name ? "on" : ""} onClick={() => setHost(g.name)}>
@@ -305,7 +313,7 @@ function EngineRow({ engine, onAction }: { engine: HFEngineStatus; onAction: (ac
   );
 }
 
-/** Custom engine locations on this Mac: a path to the server program, or empty for automatic. */
+/** Custom engine locations on the local host: a path to the server program, or empty for automatic. */
 function EngineLocations({ engines, onSaved }: { engines: HFEngineStatus[]; onSaved: () => void }) {
   const { toast } = useApp();
   const [paths, setPaths] = useState<Record<string, string>>({});
@@ -338,8 +346,7 @@ function EngineLocations({ engines, onSaved }: { engines: HFEngineStatus[]; onSa
     <details className="hf-locations">
       <summary>Custom locations</summary>
       <div className="desc muted" style={{ margin: "6px 0 8px" }}>
-        Use an engine installed somewhere ModelMatrix doesn't look. Enter the full path of its server program (for example{" "}
-        <span className="mono">/opt/llama/bin/llama-server</span>), or leave it empty to find it automatically.
+        Use an engine installed somewhere ModelMatrix doesn't look. Enter the full path of its server program, or leave it empty to find it automatically.
       </div>
       {engines.map((engine) => (
         <div className="setting-row" key={engine.id}>

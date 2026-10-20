@@ -3,7 +3,7 @@ import { Cpu, Server, Thermometer, Zap, Sparkles } from "lucide-react";
 import { openOptimize } from "./Optimize";
 import { api, remote } from "../lib/api";
 import { clock, compact, gb, hostLabel, num, pct, seconds } from "../lib/format";
-import { useApp, usePoll } from "../lib/state";
+import { useApp, usePlatform, usePoll } from "../lib/state";
 import type { Gateway, HostMetrics, InflightRow, RequestRow, StatusPayload } from "../lib/types";
 import { Empty, Meter } from "./ui";
 
@@ -194,7 +194,7 @@ export function HostCard({ name, health, healthLabel, metrics, models, stats, ad
           )}
           {metrics?.chip && <span>{metrics.chip}</span>}
           {onOptimize && (
-            <button className="btn sm ghost host-opt no-print" onClick={onOptimize} title="Free memory on this Mac">
+            <button className="btn sm ghost host-opt no-print" onClick={onOptimize} title="Free memory on this host">
               <Sparkles size={12} /> Optimize
             </button>
           )}
@@ -259,6 +259,7 @@ function RemoteHostCard({ gateway, advanced }: { gateway: Gateway; advanced: boo
 
 export function Fleet() {
   const { metrics, status, statusError, overview, bridge, ollama, settings } = useApp();
+  const { localHostLabel, bridgeLabel } = usePlatform();
   const advanced = settings.mode === "advanced";
   const running = (status?.statuses ?? []).filter((s) => s.running);
   const models = new Set<string>();
@@ -269,7 +270,7 @@ export function Fleet() {
   return (
     <section id="fleet" className="fleet section">
       <HostCard
-        name={metrics?.host?.replace(/\.local$/, "") || "This Mac"}
+        name={metrics?.host?.replace(/\.local$/, "") || localHostLabel}
         health={statusError ? "bad" : notReady ? "warn" : "ok"}
         healthLabel={statusError ? "OFFLINE" : notReady ? "LOADING" : "HEALTHY"}
         metrics={metrics}
@@ -285,7 +286,7 @@ export function Fleet() {
         ))}
       {!bridge?.app_connected && (
         <div className="feed-small" style={{ padding: "0 4px" }}>
-          <Cpu size={12} style={{ verticalAlign: -2 }} /> Remote hosts appear here while the ModelMatrix menu bar app is running.
+          <Cpu size={12} style={{ verticalAlign: -2 }} /> Remote hosts appear here while the ModelMatrix {bridgeLabel.toLowerCase()} is connected.
         </div>
       )}
     </section>
@@ -296,6 +297,7 @@ export function Fleet() {
 
 export function FilterBar() {
   const { settings, update, bridge, overview } = useApp();
+  const { localHostLabel } = usePlatform();
   const ranges = settings.mode === "advanced" ? (["1h", "24h", "7d", "30d"] as const) : (["24h", "7d", "30d"] as const);
   const gateways = bridge?.gateways ?? [];
   const knownHosts = new Set(["local", ...gateways.map((g) => g.id), ...(overview?.hosts ?? [])]);
@@ -308,7 +310,7 @@ export function FilterBar() {
           <option value="all">All servers</option>
           {[...knownHosts].map((host) => (
             <option key={host} value={host}>
-              {hostLabel(host, gateways)}
+              {hostLabel(host, gateways, localHostLabel)}
             </option>
           ))}
         </select>
@@ -333,6 +335,7 @@ export function FilterBar() {
 /* ---------------- Recent requests table ---------------- */
 
 export function RequestsTable({ rows, gateways, advanced }: { rows: RequestRow[]; gateways: Gateway[]; advanced: boolean }) {
+  const { localHostLabel } = usePlatform();
   if (!rows.length) return <Empty title="No requests in this range" />;
   return (
     <div className="table-wrap">
@@ -367,7 +370,7 @@ export function RequestsTable({ rows, gateways, advanced }: { rows: RequestRow[]
                   {advanced && r.client_process && <span className="muted"> · {r.client_process}</span>}
                 </td>
                 <td>
-                  {hostLabel(r.host, gateways)}
+                  {hostLabel(r.host, gateways, localHostLabel)}
                   {r.profile && <span className="muted"> · {r.profile}</span>}
                   {r.tier === "cloud" && <span className="badge orange" style={{ marginLeft: 6 }}>CLOUD</span>}
                 </td>

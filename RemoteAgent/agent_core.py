@@ -21,6 +21,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from platform_support import (
+    IS_WINDOWS,
+    WindowsMetricsProvider,
+    local_appdata,
+    process_command as platform_process_command,
+    process_is_alive as platform_process_is_alive,
+    process_rss_mb as platform_process_rss_mb,
+    terminate_process_tree as platform_terminate_process_tree,
+)
+
 DEFAULT_PORT = 7700
 
 TERMINATE_TIMEOUT_SECONDS = 20.0
@@ -389,7 +399,7 @@ def _unescape_double_quoted(inner: str) -> str:
 
 def parse_env_profile(file: Path) -> dict[str, str]:
     values: dict[str, str] = {}
-    content = file.read_text(encoding="utf-8")
+    content = file.read_text(encoding="utf-8-sig")
     for offset, raw_line in enumerate(content.splitlines()):
         parsed = _env_profile_assignment(raw_line, file, offset + 1)
         if parsed is None:
@@ -448,7 +458,7 @@ def _json_profile_item(file: Path, key: Any, value: Any) -> tuple[str, str]:
 
 def parse_json_profile(file: Path) -> dict[str, str]:
     try:
-        parsed = json.loads(file.read_text(encoding="utf-8"))
+        parsed = json.loads(file.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as error:
         raise InvalidProfileError(f"Profile JSON is invalid: {file}: {error}") from error
     if not isinstance(parsed, dict):
@@ -595,6 +605,8 @@ class Profile:
     def log_path(self) -> str:
         raw = self.values.get("LOG_ALIAS") or self.values.get("MODEL_ALIAS") or self.name
         safe = "".join(c if c.isalnum() or c in "_.-" else "_" for c in raw)
+        if IS_WINDOWS:
+            return str(local_appdata() / "ModelMatrix" / "logs" / f"{safe}.log")
         return f"/tmp/{safe}.log"
 
     @property
@@ -760,6 +772,8 @@ def _zombie_without_proc_stat(pid: int) -> bool:
 
 def process_is_zombie(pid: int | None) -> bool:
     """Detect defunct processes through /proc or the ps fallback."""
+    if IS_WINDOWS:
+        return False
     if not pid or pid <= 0:
         return False
     state = process_stat_state(pid)
@@ -769,6 +783,10 @@ def process_is_zombie(pid: int | None) -> bool:
 
 def reap_child(pid: int) -> bool:
     """Reap *pid* if it is our zombie/exited child. True if reaped or gone."""
+    if IS_WINDOWS:
+        # Windows has no zombie table or WNOHANG. Process handles are owned by
+        # Popen/the supervisor; querying liveness must not pass a PID to waitpid.
+        return not process_is_alive(pid)
     try:
         reaped, _ = os.waitpid(pid, os.WNOHANG)
         return reaped == pid
@@ -798,6 +816,8 @@ def process_is_alive(pid: int | None) -> bool:
     """Return liveness while treating zombies as dead and reaping owned children."""
     if not pid or pid <= 0:
         return False
+    if IS_WINDOWS:
+        return platform_process_is_alive(pid)
     # Reap our own children first so unreaped zombies do not linger.
     if reap_child(pid):
         return False
@@ -852,8 +872,12 @@ def terminate_process_tree(
     timeout: float = TERMINATE_TIMEOUT_SECONDS,
     *,
     force: bool = False,
+    identity: Any | None = None,
 ) -> None:
     """SIGTERM process group, wait, then SIGKILL. Always attempt to reap."""
+    if IS_WINDOWS:
+        platform_terminate_process_tree(pid, force=force, timeout=timeout, identity=identity)
+        return
     if force:
         _signal_process_tree(pid, signal.SIGKILL)
         _reap_until_dead(pid, min(timeout, FORCE_TERMINATE_TIMEOUT_SECONDS), 0.1)
@@ -876,12 +900,13 @@ def _reap_until_dead(pid: int, timeout: float, interval: float) -> None:
 
 def process_command(pid: int | None) -> str | None:
     """Return the process command line for *pid*, or None.
-
     Linux: read /proc/<pid>/cmdline (NUL-separated → spaces) without spawning.
     Other platforms, or empty/missing /proc entry: fall back to `ps -o command=`.
     """
     if not pid:
         return None
+    if IS_WINDOWS:
+        return platform_process_command(pid)
     command = _proc_cmdline(pid)
     if command:
         return command
@@ -909,13 +934,14 @@ def _ps_command(pid: int) -> str | None:
 
 def process_rss_mb(pid: int | None) -> float | None:
     """Return resident set size in MB for *pid*, or None.
-
     Linux: parse VmRSS from /proc/<pid>/status (kB) without spawning.
     Other platforms, or missing /proc entry: fall back to `ps -o rss=`.
     Rounding matches the historical `ps` path: one decimal place.
     """
     if not pid:
         return None
+    if IS_WINDOWS:
+        return platform_process_rss_mb(pid)
     rss = _rss_mb_from_proc(pid)
     if rss is not None:
         return rss
@@ -1006,6 +1032,8 @@ _CPU_SAMPLE_LOCK = threading.Lock()
 
 _CPU_PREV: tuple[float, float] | None = None
 
+_WINDOWS_METRICS = WindowsMetricsProvider()
+
 def _read_proc_meminfo() -> dict[str, int]:
     """Return /proc/meminfo keys in kB (Linux). Empty on non-Linux."""
     out: dict[str, int] = {}
@@ -1077,6 +1105,8 @@ def _cpu_percent_from_loadavg() -> float | None:
 
 def _sample_cpu_percent() -> float | None:
     """Busy CPU % from /proc/stat deltas, or loadavg fallback."""
+    if IS_WINDOWS:
+        return _WINDOWS_METRICS.cpu_percent()
     global _CPU_PREV
     try:
         first = Path("/proc/stat").read_text(encoding="utf-8").splitlines()[0]
@@ -1092,6 +1122,8 @@ def _sample_cpu_percent() -> float | None:
     return _cpu_busy_from_delta(total, idle, prev)
 
 def _sample_memory() -> dict[str, Any]:
+    if IS_WINDOWS:
+        return _WINDOWS_METRICS.memory()
     info = _read_proc_meminfo()
     payload = _meminfo_used_payload(info)
     if payload is not None:
@@ -1434,6 +1466,8 @@ def _macos_uptime_seconds() -> float | None:
 
 def read_uptime_seconds() -> float | None:
     """Uptime via /proc/uptime (Linux) or kern.boottime (macOS)."""
+    if IS_WINDOWS:
+        return _WINDOWS_METRICS.uptime()
     try:
         return parse_proc_uptime_seconds(
             Path("/proc/uptime").read_text(encoding="utf-8")
@@ -1444,6 +1478,8 @@ def read_uptime_seconds() -> float | None:
 
 def storage_usage(path: str = "/") -> dict[str, Any] | None:
     """Root filesystem usage via os.statvfs (POSIX). None on unsupported platforms."""
+    if IS_WINDOWS:
+        return _WINDOWS_METRICS.storage(path)
     statvfs = getattr(os, "statvfs", None)
     if statvfs is None:
         return None
@@ -1528,6 +1564,10 @@ def _skip_net_iface(iface: str) -> bool:
 
 def sample_network_rates() -> dict[str, Any] | None:
     """RX/TX rates from /proc/net/dev deltas. None off-Linux or on first sample."""
+    if IS_WINDOWS:
+        # Windows counter enumeration is intentionally delegated to the
+        # native provider in a later call; never report fabricated rates.
+        return {"rx_kbps": None, "tx_kbps": None, "source": "unavailable"}
     global _PROC_NET_DEV_PREV
     try:
         text = Path("/proc/net/dev").read_text(encoding="utf-8")

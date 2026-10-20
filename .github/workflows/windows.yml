@@ -1,0 +1,67 @@
+name: Windows
+
+on:
+  push:
+    branches: [main, windows-support]
+  pull_request:
+
+jobs:
+  windows-build-test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.x'
+      - name: Enable pnpm
+        shell: pwsh
+        run: corepack enable
+      - name: Python stdlib tests and compile
+        shell: pwsh
+        run: |
+          python -m compileall -q Windows RemoteAgent
+          if ($LASTEXITCODE -ne 0) { throw 'Python compilation failed' }
+          python -m unittest discover -s Windows/examples -p 'test_*.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'CLI tests failed' }
+          python -m unittest discover -s Windows/tests -p 'test_*.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Windows feature tests failed' }
+          python -m unittest discover -s RemoteAgent/tests -p 'test_windows_platform.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Native Job Object/process tests failed' }
+      - name: Controller smoke (foreground, loopback)
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'modelmatrix-smoke'
+          New-Item -ItemType Directory -Force $root | Out-Null
+          $p = Start-Process python -ArgumentList @('Windows/controller.py','--root',$root,'--profiles-dir',(Join-Path $root 'profiles'),'--port','17700','--no-browser') -PassThru -WindowStyle Hidden
+          try {
+            Start-Sleep -Seconds 2
+            $r = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:17700/api/status -TimeoutSec 5
+            if ($r.StatusCode -ne 200) { throw "Unexpected status $($r.StatusCode)" }
+          } finally { if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force } }
+      - name: Frozen dashboard build
+        shell: pwsh
+        working-directory: Dashboard
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - name: Isolated native installer and package smoke
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'modelmatrix-install-smoke'
+          $install = Join-Path $root 'install'
+          $data = Join-Path $root 'data'
+          $package = Join-Path $root 'packages'
+          New-Item -ItemType Directory -Force $root | Out-Null
+          & .\Scripts\install-windows.ps1 -SourceRoot $pwd -InstallRoot $install -DataRoot $data -NoBuild -NoShortcuts
+          if ($LASTEXITCODE -ne 0) { throw 'isolated installer failed' }
+          if (-not (Test-Path (Join-Path $install 'Dashboard\dist\index.html'))) { throw 'dashboard was staged at the wrong path' }
+          & .\Scripts\verify-windows.ps1 -InstallRoot $install -DataRoot $data -NoControllerProbe
+          & .\Scripts\package-windows.ps1 -SourceRoot $pwd -OutputDirectory $package -Version ci -SkipBuild
+          if (-not (Test-Path (Join-Path $package 'ModelMatrix-ci-windows.zip'))) { throw 'portable package was not created' }
+      - name: POSIX-only tests are not part of Windows job
+        shell: pwsh
+        run: Write-Output 'POSIX/macOS tests remain in their platform jobs; no Bash/Xcode/Swift command is run here.'

@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Download, Loader2, Pause, Play, Plus, RotateCcw, Trash2, X } from "lucide-react";
 import { eta, hf, isActive, size, stateWords, type HFDownload, type HFDownloadedModel } from "../lib/hf";
-import { useApp, usePoll } from "../lib/state";
+import { useApp, usePlatform, usePoll } from "../lib/state";
 import { DOWNLOADS_CHANGED, openHuggingFace } from "./HuggingFace";
 import { CopyButton, Empty, Modal, Notice, SectionCard } from "./ui";
 import { ConnectAppsLauncher } from "./ConnectApps";
@@ -315,6 +315,7 @@ function CancelDialog({ job, onClose }: { job: HFDownload; onClose: () => void }
 
 export function DownloadedModelsSection() {
   const { models, untracked } = useHFData();
+  const { localHostLabel } = usePlatform();
   const [deleting, setDeleting] = useState<HFDownloadedModel | null>(null);
   const [starting, setStarting] = useState<string>();
   const { toast } = useApp();
@@ -356,7 +357,7 @@ export function DownloadedModelsSection() {
                     <div className="muted mono hf-small">{m.repo}</div>
                     {m.missing_files > 0 && <div className="red hf-small">{m.missing_files} file(s) missing from the folder</div>}
                   </td>
-                  <td>{m.host_name ?? "This Mac"}</td>
+                  <td>{m.host_name ?? localHostLabel}</td>
                   <td className="mono">{m.engine}</td>
                   <td className="num mono">{m.kind === "ollama" ? "in Ollama" : size(m.bytes_on_disk)}</td>
                   <td>
@@ -375,7 +376,7 @@ export function DownloadedModelsSection() {
                         className="btn sm ghost"
                         onClick={() => setDeleting(m)}
                         title="Delete this model"
-                        aria-label={`Delete ${m.display_name} on ${m.host_name ?? "this Mac"}`}
+                        aria-label={`Delete ${m.display_name} on ${m.host_name ?? localHostLabel}`}
                       >
                         <Trash2 size={13} />
                       </button>

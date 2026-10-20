@@ -45,7 +45,7 @@ function Login({ onDone }: { onDone: () => void }) {
             <div className="brand-sub">Dashboard sign in</div>
           </div>
         </div>
-        <Notice>This controller is protected by an access token. Find it in the menu bar app under Settings, Connection.</Notice>
+        <Notice>This controller is protected by an access token. Find it in the ModelMatrix desktop app or controller settings.</Notice>
         <div className="field">
           <label>Access token</label>
           <input className="input mono" type="password" autoFocus value={token} onChange={(e) => setToken(e.target.value)} />
@@ -139,7 +139,7 @@ export function App() {
               ModelMatrix
             </div>
           </div>
-          <Notice kind="warn">The ModelMatrix controller is not responding. Open the ModelMatrix menu bar app or run `modelmatrixctl install`. This page reconnects automatically.</Notice>
+          <Notice kind="warn">The ModelMatrix controller is not responding. Start the local ModelMatrix controller or desktop app. This page reconnects automatically.</Notice>
         </div>
       </div>
     );

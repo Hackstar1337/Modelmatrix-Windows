@@ -21,7 +21,7 @@ class InstallerStdinTests(unittest.TestCase):
             install_root = home / ".local/share/modelmatrix-agent"
             install_root.mkdir(parents=True)
             (home / ".local/bin").mkdir(parents=True)
-            for name in ("agent_core.py", "discovery.py", "hf_agent.py", "client_connections.py", "modelmatrix_agent.py"):
+            for name in ("agent_core.py", "discovery.py", "hf_agent.py", "client_connections.py", "platform_support.py", "modelmatrix_agent.py"):
                 shutil.copy(AGENT_DIR / name, install_root / name)
             (home / "agent_core.py").write_text("# LEFTOVER_CLOBBER\n", encoding="utf-8")
 

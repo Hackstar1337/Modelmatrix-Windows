@@ -382,3 +382,18 @@ Contributions are welcome. Keep the app generic (runtime-specific behaviour belo
 ## License
 
 [MIT](LICENSE) © 2026 Hackstar1337
+
+
+## Windows distribution
+
+The Windows port reuses this Dashboard and shared RemoteAgent through a per-user Python controller and optional native tray. Python 3.10+ is required; Node is only needed to rebuild the included static Dashboard. From the complete Windows source directory:
+
+```powershell
+.\Scripts\install-windows.cmd -NoBuild
+.\Scripts\start-windows.cmd -NoBrowser
+.\Scripts\verify-windows.cmd
+```
+
+Open **http://127.0.0.1:7700/**. Follow the [step-by-step Windows setup guide](Windows/README.md) for model profiles, execution, authentication, build/package, and troubleshooting. See the [change summary](Windows/COMPATIBILITY_CHANGES.md) and [test report](Windows/TEST_REPORT.md) for the source changes and exact verification scope.
+
+Core functionality was tested natively on Windows 11 x64, including real llama.cpp GGUF inference, capture, usage, protected client endpoints, installation and graceful shutdown. Windows 10 is targeted but was not tested on a Windows 10 device. The original Mac application and Linux agent path are retained; Apple-only MLX/Metal and macOS internals do not become native Windows components. Windows CI is included, not claimed remotely executed. No Bash, Xcode, administrator rights, global Python/Node installation or automatic persistence is needed for the Windows path.

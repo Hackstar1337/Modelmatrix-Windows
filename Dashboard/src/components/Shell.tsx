@@ -38,7 +38,7 @@ import {
   Database,
 } from "lucide-react";
 import { compact, duration, num } from "../lib/format";
-import { useApp, type Page } from "../lib/state";
+import { useApp, usePlatform, type Page } from "../lib/state";
 import { api } from "../lib/api";
 import { MatrixMark } from "./ui";
 import { openOptimize } from "./Optimize";
@@ -47,6 +47,7 @@ import { openHuggingFace } from "./HuggingFace";
 
 export function Header() {
   const { settings, update, online, info, bridge } = useApp();
+  const { bridgeLabel, localHostLabel } = usePlatform();
   return (
     <header className="topbar">
       <a className="brand" href="#/overview" aria-label="ModelMatrix overview">
@@ -58,14 +59,14 @@ export function Header() {
       </a>
       <div className="topbar-right">
         <DownloadsIndicator />
-        <button className="btn sm primary no-print" onClick={openOptimize} title="Free memory on this Mac">
+        <button className="btn sm primary no-print" onClick={openOptimize} title={`Free memory on ${localHostLabel}`}>
           <Sparkles size={14} /> Optimize
         </button>
         <span className="conn no-print" title={info?.controller_url}>
           <span className={`dot ${online ? "on" : "off"}`} /> {online ? "Controller" : "Offline"}
         </span>
-        <span className="conn no-print" title="Menu bar app bridge">
-          <span className={`dot ${bridge?.app_connected ? "on" : "warn"}`} /> {bridge?.app_connected ? "Menu bar" : "Menu bar off"}
+        <span className="conn no-print" title={`${bridgeLabel} bridge`}>
+          <span className={`dot ${bridge?.app_connected ? "on" : "warn"}`} /> {bridge?.app_connected ? bridgeLabel : `${bridgeLabel} off`}
         </span>
         <div className="seg lg no-print" role="tablist" aria-label="View mode">
           {(["standard", "advanced"] as const).map((mode) => (
@@ -242,7 +243,7 @@ export function SubNav({ onNewProfile }: { onNewProfile: () => void }) {
         { label: "Controller", icon: <Laptop size={20} />, section: "controller" },
         { label: "Doctor", icon: <Stethoscope size={20} />, section: "doctor" },
         { label: "Integrations", icon: <Plug size={20} />, section: "integrations" },
-        { label: "Menu Bar App", icon: <KeyRound size={20} />, section: "menubar" },
+        { label: "Desktop Bridge", icon: <KeyRound size={20} />, section: "menubar" },
         { label: "About", icon: <Info size={20} />, section: "about" },
       ],
     },

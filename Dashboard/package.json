@@ -4,9 +4,15 @@
   "version": "1.0.0",
   "description": "ModelMatrix web dashboard served by the local controller at http://localhost:7700",
   "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "packageManager": "pnpm@11.25.0",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --import tsx tests/**/*.test.ts",
     "preview": "vite preview"
   },
   "license": "MIT",
@@ -24,6 +30,7 @@
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^6.1.2",
     "typescript": "^7.0.2",
-    "vite": "^8.3.4"
+    "vite": "^8.3.4",
+    "tsx": "^4.19.4"
   }
 }

@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from platform_support import IS_WINDOWS, WindowsListenerProvider
+
 from agent_core import (
     DEFAULT_PORT,
     InvalidProfileError,
@@ -164,7 +166,8 @@ def _configured_scan_roots(agent_root: Path | None = None) -> list[Path]:
 def _append_env_scan_roots(roots: list[Path], raw: str) -> None:
     if not raw:
         return
-    for part in raw.split(":"):
+    separator = ";" if IS_WINDOWS else ":"
+    for part in raw.split(separator):
         part = part.strip()
         if part:
             roots.append(Path(part).expanduser())
@@ -286,7 +289,7 @@ def list_listening_tcp() -> list[dict[str, Any]]:
             return _copy_listening_tcp_rows(cached[1])
         # Hold the lock across inventory so concurrent misses coalesce into one
         # fill and clear_listening_tcp_cache cannot interleave mid-write.
-        result = _list_listening_tcp_uncached()
+        result = WindowsListenerProvider().list_listening_tcp() if IS_WINDOWS else _list_listening_tcp_uncached()
         _listening_tcp_cache = (now, result)
         return _copy_listening_tcp_rows(result)
 
@@ -1011,7 +1014,13 @@ def _admit_hinted_root(root: Path, seen: set[Path], found: list[Path]) -> None:
 
 
 def _command_looks_like_path_token(token: str) -> bool:
-    return "/" in token or token.startswith("~")
+    return (
+        "/" in token
+        or "\\" in token
+        or token.startswith("~")
+        or bool(re.match(r"^[A-Za-z]:", token))
+        or token.startswith("\\\\")
+    )
 
 
 def _admit_hinted_tokens(command: str, seen: set[Path], found: list[Path]) -> None:

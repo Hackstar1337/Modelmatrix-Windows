@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { api } from "../lib/api";
 import { ago, bytes, compact, hostLabel, num, pct, seconds } from "../lib/format";
-import { useApp } from "../lib/state";
+import { useApp, usePlatform } from "../lib/state";
 import type { ProfileTemplate, RuntimeInfo } from "../lib/types";
 import { SplitPie } from "../components/charts";
 import { FilterBar } from "../components/overview";
@@ -10,6 +10,7 @@ import { CopyButton, Empty, Notice, SectionCard } from "../components/ui";
 
 export function ModelsPage({ onNewProfile }: { onNewProfile: () => void }) {
   const { overview, ollama, refreshOllama, settings, bridge } = useApp();
+  const { localHostLabel } = usePlatform();
   const [runtimes, setRuntimes] = useState<RuntimeInfo[]>([]);
   const [templates, setTemplates] = useState<ProfileTemplate[]>([]);
   useEffect(() => {
@@ -60,7 +61,7 @@ export function ModelsPage({ onNewProfile }: { onNewProfile: () => void }) {
                         {advanced && m.alias && m.alias !== m.model && <span className="badge amber" style={{ marginLeft: 6 }}>← {m.alias}</span>}
                       </td>
                       <td>
-                        {hostLabel(m.host, gateways)}
+                        {hostLabel(m.host, gateways, localHostLabel)}
                         {advanced && m.profile && <span className="muted"> · {m.profile}</span>}
                       </td>
                       <td className="num">{compact(m.requests)}</td>

@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, ApiError, post, query, remote } from "./api";
+import { platformContext, type PlatformContext } from "./platform";
 import type { BridgeState, DashboardInfo, HostMetrics, OllamaStatus, Overview, StatusPayload } from "./types";
 
 /* ---------------- Polling ---------------- */
@@ -143,6 +144,12 @@ export function useApp() {
   const value = useContext(AppContext);
   if (!value) throw new Error("useApp outside provider");
   return value;
+}
+
+/** Server-owned platform metadata with safe defaults for the legacy controller. */
+export function usePlatform(): PlatformContext {
+  const { info } = useApp();
+  return useMemo(() => platformContext(info), [info]);
 }
 
 const pendingLabel: Record<string, PendingAction> = {

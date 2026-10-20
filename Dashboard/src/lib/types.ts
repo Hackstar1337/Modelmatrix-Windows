@@ -286,6 +286,26 @@ export interface DashboardInfo {
   profiles_dir: string;
   controller_root: string;
   relay?: RelayStatus;
+  platform?: PlatformInfo;
+  capabilities?: DashboardCapabilities;
+}
+
+export interface PlatformInfo {
+  os: string;
+  display_name: string;
+  local_host_label: string;
+  credential_store: string;
+}
+
+export interface DashboardCapabilities {
+  open_folders: boolean;
+  quit_apps: boolean;
+  purge_file_cache: boolean;
+  keep_awake: boolean;
+  remote_gateways: boolean;
+  capture: boolean;
+  connect_apps: boolean;
+  huggingface: boolean;
 }
 
 export interface ProfileDocument {

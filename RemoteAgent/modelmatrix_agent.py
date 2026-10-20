@@ -99,6 +99,17 @@ from agent_core import (
     terminate_process_tree,
     urlopen_no_redirect,
 )
+from platform_support import (
+    IS_WINDOWS,
+    ProcessIdentity,
+    WindowsProcessAdapter,
+    augment_windows_path,
+    command_argv,
+    config_lock,
+    default_agent_root,
+    default_profiles_dir,
+    windows_process_supervisor,
+)
 from discovery import (  # noqa: E402
     PORT_CLAIM_DIR_RE,
     PORT_CLAIM_MARKERS,
@@ -146,6 +157,8 @@ PROFILE_SIGNAL_KEYS = frozenset({
 PROFILE_SCAN_MAX_DEPTH = 5
 
 PROFILE_SCAN_MAX_CANDIDATES = 8
+
+_WINDOWS_PROCESS_ADAPTER = windows_process_supervisor()
 
 
 @dataclass(frozen=True)
@@ -487,6 +500,14 @@ def _require_managed_start(profile: Profile) -> None:
 
 def build_start_command(profile: Profile) -> str:
     """Return the shell command that launches this profile's model server."""
+    if profile.get("START_COMMAND_JSON") is not None or profile.get("SERVER_ARGS_JSON") is not None:
+        try:
+            argv, _ = command_argv(profile.values, "")
+        except ValueError as error:
+            raise InvalidProfileError(f"{profile.name}: {error}") from error
+        if not argv:
+            raise InvalidProfileError(f"{profile.name}: launch command cannot be empty")
+        return shlex.join(argv)
     explicit = _explicit_start_command(profile)
     if explicit:
         return explicit
@@ -501,6 +522,10 @@ def build_start_command(profile: Profile) -> str:
 def _wrap_start_command(command: str, extra: str, venv: str) -> str:
     if extra:
         command = f"{command} {extra}"
+    if IS_WINDOWS:
+        # Windows activation scripts mutate only the current shell.  The
+        # adapter instead prepends Scripts to PATH and selects python.exe.
+        return command
     if venv:
         activate = Path(venv).expanduser() / "bin" / "activate"
         command = f"source {shlex.quote(str(activate))} && {command}"
@@ -578,10 +603,12 @@ def _gpu_process_rows(gpu: dict[str, Any], proc_names: dict[Any, Any]) -> list[d
 
 
 def _default_root() -> Path:
-    return Path.home() / ".local/share/modelmatrix-agent"
+    return default_agent_root()
 
 def preferred_profiles_directory() -> Path:
     """Visible default: ~/model-profiles (not buried under the agent install root)."""
+    if IS_WINDOWS:
+        return default_profiles_dir()
     return Path.home() / "model-profiles"
 
 try:
@@ -605,9 +632,17 @@ def save_agent_config(root: Path, updates: dict[str, Any]) -> Path:
     root = root.expanduser()
     root.mkdir(parents=True, exist_ok=True)
     path = agent_config_path(root)
-    with open(_agent_config_lock_path(path), "w", encoding="utf-8") as lock_handle:
+    # Opening with "w" truncates before the lock is acquired.  a+b preserves
+    # the shared config.json.lock/config.json.tmp protocol and lets Windows
+    # lock a pre-sized byte.
+    with open(_agent_config_lock_path(path), "a+b") as lock_handle:
         _flock_exclusive(lock_handle)
-        _merge_locked_agent_config(path, root, updates)
+        try:
+            _merge_locked_agent_config(path, root, updates)
+        finally:
+            if IS_WINDOWS:
+                from platform_support import config_unlock
+                config_unlock(lock_handle)
     return path
 
 
@@ -620,8 +655,12 @@ def _agent_config_lock_path(path: Path) -> Path:
 
 
 def _flock_exclusive(lock_handle) -> None:
-    if fcntl is not None:
+    if fcntl is not None and not IS_WINDOWS:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    elif IS_WINDOWS:
+        config_lock(lock_handle)
+    else:
+        raise OSError("exclusive config locking is unavailable on this platform")
 
 
 def _merge_locked_agent_config(path: Path, root: Path, updates: dict[str, Any]) -> None:
@@ -825,6 +864,32 @@ def _popen_profile_bash(
     canonical: str,
     cwd: Path,
 ) -> subprocess.Popen[str]:
+    if IS_WINDOWS:
+        values = dict(environment)
+        profile_values = {key: str(value) for key, value in environment.items() if key in {
+            "START_COMMAND", "START_COMMAND_JSON", "SERVER_ARGS_JSON", "SERVER_BIN", "EXTRA_ARGS_JSON", "SHELL"
+        }}
+        try:
+            if profile_values.get("START_COMMAND_JSON") or profile_values.get("SERVER_ARGS_JSON") or profile_values.get("SERVER_BIN") or profile_values.get("START_COMMAND"):
+                argv, shell = command_argv({**profile_values, "START_COMMAND": profile_values.get("START_COMMAND", "")}, command)
+            else:
+                # Adapter-generated commands are known command templates.  They
+                # are tokenized once here; user commands must use JSON or an
+                # explicit SHELL mode above.
+                argv = shlex.split(command, posix=True)
+                shell = None
+            if not argv:
+                raise ValueError("empty launch command")
+            venv = environment.get("VENV")
+            if venv:
+                values = augment_windows_path(values, venv=venv)
+                if Path(argv[0]).name.lower() in {"python", "python3", "python.exe", "python3.exe"}:
+                    argv[0] = str(Path(venv) / "Scripts" / "python.exe")
+            if argv[0].lower() in {"llama-server", "llama-server.exe"}:
+                argv[0] = environment.get("SERVER_BIN") or "llama-server.exe"
+            return _WINDOWS_PROCESS_ADAPTER.launch(argv, cwd=cwd, env=values, log_handle=log_handle, shell=shell)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            raise OperationFailedError(f"failed to launch {canonical}: {error}") from error
     try:
         return subprocess.Popen(
             ["/bin/bash", "-lc", command],
@@ -849,6 +914,7 @@ def _popen_profile(
 ) -> subprocess.Popen[str]:
     log_path = Path(profile.log_path)
     try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         log_handle = log_path.open("ab")
     except OSError as error:
         raise OperationFailedError(f"cannot open log {log_path}: {error}") from error
@@ -930,11 +996,11 @@ def resolve_profiles_directory(
 ) -> Path:
     """Pick the profiles folder without inventing profile contents.
 
-    Order: CLI/explicit → env → config.json profiles_dir (when it has loadable
-    flat profiles or port-claim folders) → existing <root>/model-profiles
-    (legacy installs with real profiles) → ~/model-profiles (when populated) →
-    first configured scan_roots entry with port-claim markers → configured
-    profiles_dir if set but empty → ~/model-profiles.
+    Order: CLI/explicit â†’ env â†’ config.json profiles_dir (when it has loadable
+    flat profiles or port-claim folders) â†’ existing <root>/model-profiles
+    (legacy installs with real profiles) â†’ ~/model-profiles (when populated) â†’
+    first configured scan_roots entry with port-claim markers â†’ configured
+    profiles_dir if set but empty â†’ ~/model-profiles.
     """
     if explicit is not None:
         return Path(explicit).expanduser().resolve()
@@ -1136,7 +1202,7 @@ def scan_profile_directories(
     """Find directories that already hold Matrix-shaped launch .env/.json files.
 
     Does not invent flags - only groups files an AI or user already wrote
-    (often `model.env`, `qwen.env`, …) by parent folder.
+    (often `model.env`, `qwen.env`, â€¦) by parent folder.
     """
     home = (home or Path.home()).expanduser()
     tallies: dict[Path, list[str]] = {}
@@ -1210,7 +1276,7 @@ def _print_profile_scan_candidates(candidates: list[dict[str, Any]]) -> None:
     print("Found folders that look like they already have model launch profiles:")
     for index, candidate in enumerate(candidates, start=1):
         preview = ", ".join(candidate["files"][:4])
-        extra = "" if len(candidate["files"]) <= 4 else ", …"
+        extra = "" if len(candidate["files"]) <= 4 else ", â€¦"
         print(
             f"  [{index}] {candidate['path']} "
             f"({candidate['profile_count']} file(s): {preview}{extra})"
@@ -1221,7 +1287,7 @@ def _print_profile_scan_candidates(candidates: list[dict[str, Any]]) -> None:
 
 
 def _print_profiles_directory_prompt(current: Path, candidates: list[dict[str, Any]]) -> None:
-    print("Model profiles are plain .env/.json launch files (ports, START_COMMAND, …).")
+    print("Model profiles are plain .env/.json launch files (ports, START_COMMAND, â€¦).")
     print("Matrix only needs the folder that already holds them - it will not")
     print("author flags for every runtime fork.")
     print()
@@ -1503,6 +1569,7 @@ class AgentService:
         # Profiles started by *this* agent process. Crash-recovery restarts only
         # these - an agent reboot / login never spontaneously loads a model.
         self._supervised: set[str] = set()
+        self._children: dict[str, subprocess.Popen] = {}
         self._benchmark_lock = threading.Lock()
         self._benchmark_running = False
         # Hugging Face downloads, engine installs and profiles (created by serve).
@@ -1601,7 +1668,7 @@ class AgentService:
         loaded = self.profiles.load()
         conflicts = self.profiles.conflicts(loaded)
         names = self._selected_status_names(loaded, selected)
-        # One inventory for profile port attribution (no N× socket/lsof) and,
+        # One inventory for profile port attribution (no NÃ— socket/lsof) and,
         # when listing everything, claim scan + live discovery.
         listeners = list_listening_tcp()
         statuses, profile_ports = self._status_rows_for_names(
@@ -2561,7 +2628,7 @@ class AgentService:
             self._spawn_profile(profile, canonical, command)
 
     def _reject_unlaunchable_external(self, profile: Profile, canonical: str) -> None:
-        if not (profile.get("START_COMMAND") or "").strip() and profile.runtime_spec[2] == "external":
+        if not any((profile.get(key) or "").strip() for key in ("START_COMMAND", "START_COMMAND_JSON", "SERVER_ARGS_JSON")) and profile.runtime_spec[2] == "external":
             raise UnsupportedError(
                 f"{canonical}: discovered endpoint has no launch claim; cannot start from Matrix"
             )
@@ -2570,7 +2637,7 @@ class AgentService:
         # Idempotent only when *this* agent owns a live pid file - not when a
         # foreign listener happens to answer health on the profile port.
         owned_pid = self._read_pid(canonical)
-        if owned_pid and process_is_alive(owned_pid):
+        if owned_pid and self._profile_process_alive(canonical, owned_pid):
             self._supervised.add(canonical)
             return True
         return False
@@ -2621,7 +2688,15 @@ class AgentService:
             canonical=canonical,
             cwd=profile.working_directory or self.configuration.root,
         )
-        self._pid_file(canonical).write_text(f"{process.pid}\n", encoding="utf-8")
+        self._children[canonical] = process
+        if IS_WINDOWS:
+            identity = _WINDOWS_PROCESS_ADAPTER.identity(process.pid)
+            record = {"pid": process.pid}
+            if identity is not None:
+                record.update({"created_ns": identity.created_ns, "executable": identity.executable, "fingerprint": identity.fingerprint})
+            self._pid_file(canonical).write_text(json.dumps(record) + "\n", encoding="utf-8")
+        else:
+            self._pid_file(canonical).write_text(f"{process.pid}\n", encoding="utf-8")
         self._supervised.add(canonical)
         clear_listening_tcp_cache()
 
@@ -2659,7 +2734,7 @@ class AgentService:
 
     def _owned_alive_pid(self, name: str, primary_pid) -> int | None:
         owned = self._read_pid(name)
-        if owned and owned == primary_pid and process_is_alive(owned):
+        if owned and owned == primary_pid and self._profile_process_alive(name, owned):
             return owned
         return None
 
@@ -2670,6 +2745,18 @@ class AgentService:
         environment = dict(os.environ)
         environment.update(profile.values)
         try:
+            if IS_WINDOWS:
+                shell = (profile.get("SHELL") or "").strip().lower()
+                if shell not in {"powershell", "cmd"}:
+                    return ValueError("Windows STOP_COMMAND requires SHELL=powershell or SHELL=cmd")
+                executable = "powershell.exe" if shell == "powershell" else "cmd.exe"
+                args = (
+                    [executable, "-NoProfile", "-NonInteractive", "-Command", stop_command]
+                    if shell == "powershell"
+                    else [executable, "/d", "/s", "/c", stop_command]
+                )
+                subprocess.run(args, cwd=profile.working_directory, env=environment, capture_output=True, check=True, timeout=60)
+                return None
             subprocess.run(
                 ["/bin/bash", "-lc", stop_command],
                 cwd=profile.working_directory,
@@ -2720,6 +2807,14 @@ class AgentService:
 
     def _finish_idle_stop(self, canonical: str) -> None:
         self._pid_file(canonical).unlink(missing_ok=True)
+        child = self._children.pop(canonical, None)
+        if child is not None:
+            try:
+                child.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                self._children[canonical] = child
+            except (AttributeError, OSError, ChildProcessError):
+                pass
         clear_listening_tcp_cache()
 
     def _should_skip_stop(self, current: dict[str, Any], primary_pid: int | None, force: bool) -> bool:
@@ -2931,9 +3026,32 @@ class AgentService:
 
     def _read_pid(self, name: str) -> int | None:
         try:
-            return int(self._pid_file(name).read_text(encoding="utf-8").strip())
-        except (OSError, ValueError):
+            raw = self._pid_file(name).read_text(encoding="utf-8").strip()
+            if IS_WINDOWS and raw.startswith("{"):
+                value = json.loads(raw).get("pid")
+                return int(value) if value is not None else None
+            return int(raw)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return None
+    def _read_pid_identity(self, name: str) -> ProcessIdentity | None:
+        if not IS_WINDOWS:
+            return None
+        try:
+            payload = json.loads(self._pid_file(name).read_text(encoding="utf-8"))
+            return ProcessIdentity(
+                int(payload["pid"]), payload.get("created_ns"),
+                payload.get("executable"), payload.get("fingerprint"),
+            )
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            return None
+    def _profile_process_alive(self, name: str, pid: int | None) -> bool:
+        if not pid:
+            return False
+        if not IS_WINDOWS:
+            return process_is_alive(pid)
+        current = _WINDOWS_PROCESS_ADAPTER.identity(pid)
+        expected = self._read_pid_identity(name)
+        return bool(current and process_is_alive(pid) and expected and expected.matches(current))
 
     def _profile_command_markers(self, profile: Profile) -> list[str]:
         return [
@@ -3072,22 +3190,33 @@ class AgentService:
         force: bool = False,
     ) -> None:
         self_pid = os.getpid()
-        self._terminate_owned_pid(primary_pid, self_pid=self_pid, force=force)
+        expected = self._read_pid_identity(profile.name) if IS_WINDOWS else None
+        self._terminate_owned_pid(primary_pid, self_pid=self_pid, force=force, expected=expected)
         # Always re-check the listen port: vLLM may leave EngineCore on the
         # port under a different pid after the launcher shell exits.
         # `force` only strengthens the signal - never skips ownership matching
         # (Swift terminateProfileProcesses always requires processMatches).
         listener = self._owned_listener_pid(profile, primary_pid, self_pid)
         if listener is not None:
-            self._terminate_owned_pid(listener, self_pid=self_pid, force=force)
+            listener_expected = _WINDOWS_PROCESS_ADAPTER.identity(listener) if IS_WINDOWS else None
+            self._terminate_owned_pid(
+                listener, self_pid=self_pid, force=force, expected=listener_expected
+            )
 
-    def _terminate_owned_pid(self, pid: int | None, *, self_pid: int, force: bool) -> None:
+    def _terminate_owned_pid(
+        self,
+        pid: int | None,
+        *,
+        self_pid: int,
+        force: bool,
+        expected: ProcessIdentity | None = None,
+    ) -> None:
         if not pid or pid == self_pid:
             return
         if process_is_zombie(pid):
             reap_child(pid)
             return
-        terminate_process_tree(pid, force=force)
+        terminate_process_tree(pid, force=force, identity=expected)
 
     def _wait_or_force_stop(
         self,
@@ -3820,6 +3949,8 @@ class UsageRelay:
         self._targets_lock = threading.Lock()
         self.server: ThreadingHTTPServer | None = None
         self.error: str | None = None
+        self._closed = threading.Event()
+        self._prune_thread = None
 
     # -- lifecycle ----------------------------------------------------------
     def start(self) -> bool:
@@ -3837,16 +3968,30 @@ class UsageRelay:
             return False
         self.server.daemon_threads = True
         threading.Thread(target=self.server.serve_forever, name="usage-relay", daemon=True).start()
-        threading.Thread(target=self._prune_loop, name="usage-prune", daemon=True).start()
+        self._prune_thread = threading.Thread(target=self._prune_loop, name="usage-prune", daemon=True)
+        self._prune_thread.start()
         return True
 
+    def stop(self) -> None:
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        if self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
+            self.server = None
+        if self._prune_thread is not None:
+            self._prune_thread.join(timeout=2)
+        with self.store._lock:
+            self.store._db.close()
+
     def _prune_loop(self) -> None:
-        while True:
+        while not self._closed.is_set():
             try:
                 self.store.prune()
             except Exception:  # pragma: no cover - best effort housekeeping
                 pass
-            time.sleep(3600)
+            self._closed.wait(3600)
 
     # -- routing ------------------------------------------------------------
     def targets(self) -> list[UsageTarget]:
@@ -4415,12 +4560,12 @@ def _print_link_human(info: dict[str, Any], configuration: AgentConfiguration) -
     print(f"  {info['link']}")
     print()
     print(f"Profiles folder: {configuration.profiles_directory}")
-    print("Drop one .env/.json per model there (PORT / START_COMMAND / …), then")
-    print("Settings → Remote Gateways → Add Remote Gateway → paste the link.")
+    print("Drop one .env/.json per model there (PORT / START_COMMAND / â€¦), then")
+    print("Settings â†’ Remote Gateways â†’ Add Remote Gateway â†’ paste the link.")
     print("Every gateway field stays editable on the Mac.")
     print()
     print("Discovery is host-generic: listening model ports + any numeric")
-    print("port folders (…/8080/flags.env) under $HOME or")
+    print("port folders (â€¦/8080/flags.env) under $HOME or")
     print(f"${SCAN_ROOTS_ENV}. Nothing is invented for unknown ports.")
 
 def _cmd_serve(args: argparse.Namespace, configuration: AgentConfiguration, service: "AgentService") -> int:
@@ -4676,4 +4821,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

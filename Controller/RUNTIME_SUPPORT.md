@@ -192,3 +192,8 @@ Other modes:
 - Stop then signals the process group and falls back to the stored PID.
 - `stop-all` stops active benchmark jobs and every profile, then runs the legacy process sweeper.
 - Port fallback only claims a listener when the health check matches or the process command contains profile markers.
+
+
+## Windows distribution boundary
+
+The Windows controller is shipped as a per-user Python service with the existing Dashboard/API surface and an optional tray companion. Installation and upgrades are handled by the PowerShell scripts under `Scripts/`; mutable user data remains outside the install root. Apple-only MLX/Metal behavior is capability-gated and reported unsupported on Windows. A successful Windows CI or `verify-windows.ps1` run covers compilation, packaging, and local HTTP health only; it does not certify every external model runtime, GPU driver, or model artifact.

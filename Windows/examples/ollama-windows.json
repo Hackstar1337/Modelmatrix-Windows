@@ -1,0 +1,9 @@
+{
+  "DISPLAY_NAME": "Ollama (Windows)",
+  "RUNTIME": "ollama",
+  "REQUEST_MODEL": "llama3.2",
+  "SERVER_MODEL_ID": "llama3.2",
+  "HOST": "127.0.0.1",
+  "PORT": "11434",
+  "BASE_URL": "http://127.0.0.1:11434/v1"
+}

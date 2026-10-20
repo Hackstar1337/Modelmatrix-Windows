@@ -1,0 +1,11 @@
+{
+  "DISPLAY_NAME": "Llama.cpp (Windows)",
+  "RUNTIME": "llama.cpp",
+  "REQUEST_MODEL": "model.gguf",
+  "SERVER_MODEL_ID": "model.gguf",
+  "PORT": "8080",
+  "HOST": "127.0.0.1",
+  "MODEL_FILE": "C:\\Models\\model.gguf",
+  "START_COMMAND_JSON": "[\"C:\\\\Apps\\\\llama.cpp\\\\llama-server.exe\", \"--model\", \"C:\\\\Models\\\\model.gguf\", \"--host\", \"127.0.0.1\", \"--port\", \"{port}\", \"--alias\", \"model.gguf\"]",
+  "WORKING_DIRECTORY": "C:\\Apps\\llama.cpp"
+}

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { AppWindow, Download, ExternalLink, FolderOpen, Loader2, RefreshCw, ScrollText, Stethoscope, Trash2 } from "lucide-react";
 import { api, post } from "../lib/api";
 import { ago, compact } from "../lib/format";
-import { useApp, usePoll } from "../lib/state";
+import { useApp, usePlatform, usePoll } from "../lib/state";
 import type { CaptureState, RelayStatus } from "../lib/types";
 import { Confirm, CopyButton, Empty, MatrixMark, Notice, SectionCard, Switch } from "../components/ui";
 import { EnginesSection, HuggingFaceSettingsSection } from "../components/HFSettings";
@@ -18,6 +18,7 @@ interface DoctorReport {
 
 export function SettingsPage() {
   const { settings, update, info, status, bridge, bridgeCommand, toast, refreshStatus, refreshOverview } = useApp();
+  const { capabilities, bridgeLabel, folderLabel, localHostLabel, platform } = usePlatform();
   const usage = usePoll<RelayStatus & { capture?: CaptureState[] }>((signal) => api("/api/usage/settings", { signal }), 6000);
   const [retention, setRetention] = useState<string>("");
   const [profilesDir, setProfilesDir] = useState("");
@@ -63,7 +64,7 @@ export function SettingsPage() {
       <div className="page-title">
         <div>
           <h1>Settings</h1>
-          <p>Dashboard preferences, usage metering, controller and menu bar app.</p>
+            <p>Dashboard preferences, usage metering, controller and {bridgeLabel.toLowerCase()}.</p>
         </div>
       </div>
 
@@ -220,7 +221,7 @@ export function SettingsPage() {
           <dt>Controller root</dt>
           <dd>{status?.controller_root ?? info?.controller_root}</dd>
           <dt>Access</dt>
-          <dd>{info?.token_required ? "token required" : "this Mac only (loopback)"}</dd>
+          <dd>{info?.token_required ? "token required" : `${localHostLabel} only (loopback)`}</dd>
         </dl>
         <div className="sep" />
         <div className="field">
@@ -246,8 +247,8 @@ export function SettingsPage() {
           <span className="hint">Every .env or .json file in this folder is a model profile.</span>
         </div>
         <div className="btn-row" style={{ marginTop: 14 }}>
-          <button className="btn" disabled={!bridge?.app_connected} onClick={() => appAction("app.open_profiles_folder", "Opened profiles folder in Finder")}>
-            <FolderOpen size={14} /> Open in Finder
+          <button className="btn" disabled={!bridge?.app_connected || !capabilities.open_folders} onClick={() => appAction("app.open_profiles_folder", `Opened profiles folder in ${folderLabel.replace(/^Open in /, "")}`)}>
+            <FolderOpen size={14} /> {folderLabel}
           </button>
           <button className="btn" disabled={!bridge?.app_connected} onClick={() => appAction("app.open_logs", "Opened logs folder")}>
             <ScrollText size={14} /> Open logs
@@ -269,7 +270,7 @@ export function SettingsPage() {
           <div className="stack">
             <div className="row wrap feed-small" style={{ gap: 16 }}>
               <span>Controller: {doctor.controller?.reachable ? "reachable" : "unreachable"}</span>
-              <span>Launch agent: {doctor.launch_agent?.installed ? (doctor.launch_agent.running ? "installed, running" : "installed, stopped") : "not installed"}</span>
+              <span>Startup service: {doctor.launch_agent?.installed ? (doctor.launch_agent.running ? "installed, running" : "installed, stopped") : "not installed"}</span>
               <span>Profiles: {doctor.controller?.profiles ?? "-"}</span>
             </div>
             {doctor.findings.length ? (
@@ -337,7 +338,7 @@ export function SettingsPage() {
         id="menubar"
         title={
           <>
-            Menu bar app <span className={`dot ${bridge?.app_connected ? "on" : "warn"}`} />
+            {bridgeLabel} <span className={`dot ${bridge?.app_connected ? "on" : "warn"}`} />
           </>
         }
         meta={bridge?.app_connected ? `connected · ${ago(bridge.last_heartbeat)}` : "not running"}
@@ -374,7 +375,7 @@ export function SettingsPage() {
             </div>
           </div>
         ) : (
-          <Notice kind="warn">The menu bar app is not running. Everything on this Mac still works here; remote hosts, Finder shortcuts and Keychain-backed actions need the app.</Notice>
+          <Notice kind="warn">The {bridgeLabel.toLowerCase()} is not connected. Core controller features remain available, but desktop actions and remote gateways may be unavailable on this host.</Notice>
         )}
       </SectionCard>
 
@@ -383,7 +384,7 @@ export function SettingsPage() {
           <MatrixMark size={48} />
           <div>
             <div style={{ fontWeight: 700, fontSize: 18 }}>ModelMatrix {info?.version}</div>
-            <div className="muted">Local LLM control center for macOS: run, switch, benchmark and meter every model from the menu bar or this dashboard.</div>
+            <div className="muted">Local LLM control center for {platform.display_name}: run, switch, benchmark and meter every model from this dashboard or the {bridgeLabel.toLowerCase()}.</div>
             <a href="https://github.com/Hackstar1337/ModelMatrix" target="_blank" rel="noreferrer" className="row" style={{ gap: 4, marginTop: 6, display: "inline-flex" }}>
               github.com/Hackstar1337/ModelMatrix <ExternalLink size={12} />
             </a>

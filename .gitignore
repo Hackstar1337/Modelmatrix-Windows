@@ -64,3 +64,6 @@ venv/
 # macOS
 .DS_Store
 **/.DS_Store
+
+# Windows generated distribution packages
+/dist-windows/

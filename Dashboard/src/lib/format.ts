@@ -111,8 +111,8 @@ export function bucketLabel(epochSeconds: number, range: string): string {
   return date.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
-export function hostLabel(host: string | undefined, gateways: { id: string; name: string }[] = []): string {
-  if (!host || host === "local") return "This Mac";
+export function hostLabel(host: string | undefined, gateways: { id: string; name: string }[] = [], localLabel = "This Mac"): string {
+  if (!host || host === "local") return localLabel;
   return gateways.find((g) => g.id === host)?.name ?? host;
 }
 

@@ -1,0 +1,12 @@
+{
+  "DISPLAY_NAME": "Custom OpenAI-compatible server",
+  "RUNTIME": "command",
+  "REQUEST_MODEL": "custom-model",
+  "SERVER_MODEL_ID": "custom-model",
+  "PORT": "9000",
+  "HOST": "127.0.0.1",
+  "HEALTHCHECK_MODE": "http-200",
+  "HEALTHCHECK_URL": "http://127.0.0.1:9000/health",
+  "START_COMMAND_JSON": "[\"C:\\\\Program Files\\\\My Models\\\\server.exe\", \"--config\", \"C:\\\\Users\\\\Public\\\\模型\\\\server.json\", \"--listen\", \"127.0.0.1:9000\"]",
+  "WORKING_DIRECTORY": "C:\\Program Files\\My Models"
+}

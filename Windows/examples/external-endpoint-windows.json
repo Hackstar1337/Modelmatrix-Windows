@@ -1,0 +1,11 @@
+{
+  "DISPLAY_NAME": "Existing external endpoint",
+  "RUNTIME": "external",
+  "REQUEST_MODEL": "local-model",
+  "SERVER_MODEL_ID": "local-model",
+  "BASE_URL": "http://127.0.0.1:1234/v1",
+  "HOST": "127.0.0.1",
+  "PORT": "1234",
+  "HEALTHCHECK_MODE": "http-200",
+  "HEALTHCHECK_URL": "http://127.0.0.1:1234/health"
+}

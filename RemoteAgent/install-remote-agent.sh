@@ -64,6 +64,7 @@ DISCOVERY_SOURCE="$SCRIPT_DIR/discovery.py"
 HF_SOURCE="$SCRIPT_DIR/hf_agent.py"
 CONNECTION_SOURCE="$SCRIPT_DIR/client_connections.py"
 CORE_SOURCE="$SCRIPT_DIR/agent_core.py"
+PLATFORM_SOURCE="$SCRIPT_DIR/platform_support.py"
 INSTALL_ROOT="$HOME/.local/share/modelmatrix-agent"
 BIN_DIR="$HOME/.local/bin"
 BIN_PATH="$BIN_DIR/modelmatrix-agent"
@@ -165,6 +166,7 @@ install_agent_module "agent_core.py" "$CORE_SOURCE"
 install_agent_module "discovery.py" "$DISCOVERY_SOURCE"
 install_agent_module "hf_agent.py" "$HF_SOURCE"
 install_agent_module "client_connections.py" "$CONNECTION_SOURCE"
+install_agent_module "platform_support.py" "$PLATFORM_SOURCE"
 # Same atomic-replace contract as install_agent_module (live-path safety).
 if [ "$ran_from_stdin" != 1 ] && [ -f "$AGENT_SOURCE" ]; then
     install -m 0755 "$AGENT_SOURCE" "$INSTALL_ROOT/modelmatrix_agent.py.new"
@@ -184,6 +186,7 @@ fi
 [ -f "$INSTALL_ROOT/discovery.py" ] || die "discovery.py missing next to the agent"
 [ -f "$INSTALL_ROOT/hf_agent.py" ] || die "hf_agent.py missing next to the agent"
 [ -f "$INSTALL_ROOT/client_connections.py" ] || die "client_connections.py missing next to the agent"
+[ -f "$INSTALL_ROOT/platform_support.py" ] || die "platform_support.py missing next to the agent"
 
 # Persist the profiles folder so `serve` (systemd) keeps using it without flags.
 python3 - "$INSTALL_ROOT" "$PROFILES_DIR" <<'PY'

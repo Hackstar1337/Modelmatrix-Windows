@@ -3,10 +3,11 @@ import { FeedItem, FilterBar, Fleet, LiveFeed, RequestsTable } from "../componen
 import { LatencyChart, SplitPie, VolumeChart, useColors } from "../components/charts";
 import { SectionCard, Tile } from "../components/ui";
 import { compact, hostLabel, num, pct, seconds, trend } from "../lib/format";
-import { useApp } from "../lib/state";
+import { useApp, usePlatform } from "../lib/state";
 
 export function OverviewPage() {
   const { overview, status, ollama, settings, bridge } = useApp();
+  const { localHostLabel } = usePlatform();
   const colors = useColors();
   const [split, setSplit] = useState<"tier" | "server">("tier");
   const s = overview?.summary;
@@ -30,7 +31,7 @@ export function OverviewPage() {
   ];
   const serverMap = new Map<string, number>();
   for (const m of overview?.models ?? []) {
-    const key = m.tier === "cloud" ? "Cloud" : m.host && m.host !== "local" ? hostLabel(m.host, gateways) : m.profile || m.runtime || "This Mac";
+    const key = m.tier === "cloud" ? "Cloud" : m.host && m.host !== "local" ? hostLabel(m.host, gateways, localHostLabel) : m.profile || m.runtime || localHostLabel;
     serverMap.set(key, (serverMap.get(key) ?? 0) + m.requests);
   }
   const serverSlices = [...serverMap.entries()].sort((a, b) => b[1] - a[1]).map(([name, value]) => ({ name, value }));

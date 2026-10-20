@@ -220,3 +220,8 @@ modelmatrix-agent ports          # listening + claims
 modelmatrix-agent scan-profiles  # profile folders + port claims
 curl -sS -H "Authorization: Bearer $TOKEN" http://HOST:7700/api/ports | jq .
 ```
+
+
+## Windows host boundary
+
+The Windows distribution uses the same authenticated HTTP contracts but a per-user Python controller and PowerShell lifecycle scripts; it does not require Bash or an administrator account. The native tray is optional. MLX/Metal and other Apple-only runtime operations remain explicitly unsupported, and Windows verification covers packaging plus local controller health rather than claiming all external engines or GPU drivers are installed.

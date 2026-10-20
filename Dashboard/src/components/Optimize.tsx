@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, CheckCircle2, KeyRound, Loader2, Lock, RefreshCw, Sparkles, XCircle } from "lucide-react";
 import { api, post } from "../lib/api";
 import { ago, bytes } from "../lib/format";
-import { useApp } from "../lib/state";
+import { useApp, usePlatform } from "../lib/state";
 import type {
   AppMemory,
   MemorySnapshot,
@@ -79,6 +79,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function OptimizeModal({ onClose }: { onClose: () => void }) {
   const { toast, refreshStatus, refreshOllama, bridge, bridgeCommand } = useApp();
+  const { capabilities, platform, bridgeLabel } = usePlatform();
   const [plan, setPlan] = useState<OptimizePlan | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [preset, setPreset] = useState<Preset>("maximum");
@@ -88,7 +89,7 @@ function OptimizeModal({ onClose }: { onClose: () => void }) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [confirming, setConfirming] = useState(false);
-  const appConnected = !!bridge?.app_connected;
+  const appConnected = !!bridge?.app_connected && capabilities.quit_apps;
 
   const load = useCallback(async () => {
     try {
@@ -98,7 +99,7 @@ function OptimizeModal({ onClose }: { onClose: () => void }) {
       // Keep the user's ticks; drop items that are gone; preselect on first load.
       setSelected((current) => {
         const ids = new Set(next.items.map((i) => i.id));
-        if (!current) return new Set(next.presets.maximum);
+        if (!current) return new Set(next.presets.maximum.filter((id) => capabilities.purge_file_cache || next.items.find((item) => item.id === id)?.kind !== "file_cache"));
         return new Set([...current].filter((id) => ids.has(id)));
       });
       setSelectedApps((current) => {
@@ -108,7 +109,7 @@ function OptimizeModal({ onClose }: { onClose: () => void }) {
     } catch (e) {
       setError((e as Error).message);
     }
-  }, []);
+  }, [capabilities.purge_file_cache]);
 
   useEffect(() => {
     load();
@@ -137,12 +138,12 @@ function OptimizeModal({ onClose }: { onClose: () => void }) {
     });
 
   const chosen = useMemo(() => (plan?.items ?? []).filter((i) => selected?.has(i.id)), [plan, selected]);
-  const quittableApps = useMemo(() => (plan?.apps ?? []).filter((a) => a.quittable && a.path), [plan]);
+  const quittableApps = useMemo(() => (plan?.apps ?? []).filter((a) => capabilities.quit_apps && a.quittable && a.path), [capabilities.quit_apps, plan]);
   const chosenApps = useMemo(() => quittableApps.filter((a) => selectedApps.has(a.path as string)), [quittableApps, selectedApps]);
   const allAppsSelected = quittableApps.length > 0 && chosenApps.length === quittableApps.length;
   const toggleAllApps = () => setSelectedApps(allAppsSelected ? new Set() : new Set(quittableApps.map((a) => a.path as string)));
   const estimate = [...chosen, ...chosenApps].reduce((sum, i) => sum + i.bytes, 0);
-  const wantsPurge = chosen.some((i) => i.kind === "file_cache");
+  const wantsPurge = capabilities.purge_file_cache && chosen.some((i) => i.kind === "file_cache");
   const hasWork = chosen.length > 0 || chosenApps.length > 0;
   const viewerApps = chosenApps.filter((a) => isViewerBrowser(a.name));
 
@@ -291,7 +292,7 @@ function OptimizeModal({ onClose }: { onClose: () => void }) {
       {plan?.memory && <MemoryBar memory={outcome?.after ?? plan.memory} />}
       {phase === "purging" && (
         <Notice kind="info">
-          <KeyRound size={14} style={{ verticalAlign: -2 }} /> macOS is asking for your password to clear the file cache. Cancel the dialog to skip this step.
+          <KeyRound size={14} style={{ verticalAlign: -2 }} /> The {platform.display_name} controller is applying its protected cache policy. Cancel the system prompt to skip this step.
         </Notice>
       )}
       {phase === "quitting" && (
@@ -318,8 +319,11 @@ function OptimizeModal({ onClose }: { onClose: () => void }) {
             </div>
             <div className="opt-list">
               {plan.items.map((item) => (
-                <ItemRow key={item.id} item={item} checked={!!selected?.has(item.id)} disabled={busy} onToggle={() => toggle(item.id)} />
+                <ItemRow key={item.id} item={item} checked={!!selected?.has(item.id)} disabled={busy || (item.kind === "file_cache" && !capabilities.purge_file_cache)} onToggle={() => toggle(item.id)} />
               ))}
+              {plan.items.some((item) => item.kind === "file_cache") && !capabilities.purge_file_cache && (
+                <Notice kind="info">File-cache purge is unavailable on {platform.display_name}. Model and server cleanup remains available; this dashboard will not claim to clear system cache.</Notice>
+              )}
               {plan.items.length === 1 && (
                 <div className="feed-small" style={{ padding: "6px 2px" }}>
                   No models are loaded right now. Clearing the file cache is the only thing left to free.
@@ -336,6 +340,7 @@ function OptimizeModal({ onClose }: { onClose: () => void }) {
                 allSelected={allAppsSelected}
                 enabled={appConnected && !busy}
                 appConnected={appConnected}
+                bridgeLabel={bridgeLabel}
                 onToggle={toggleApp}
                 onToggleAll={toggleAllApps}
               />
@@ -348,7 +353,7 @@ function OptimizeModal({ onClose }: { onClose: () => void }) {
           title={`Quit ${chosenApps.length} app${chosenApps.length === 1 ? "" : "s"} and optimize?`}
           message={
             <>
-              {listNames(chosenApps)} will close the way they do when you press ⌘Q, and can still ask to save unsaved work.
+              {listNames(chosenApps)} will close through the {bridgeLabel.toLowerCase()}; unsaved-work prompts may remain open.
               {viewerApps.length > 0 && <> This page is open in {listNames(viewerApps)}, so it closes last, after the results are shown.</>}
             </>
           }
@@ -371,10 +376,11 @@ function AppsList(props: {
   allSelected: boolean;
   enabled: boolean;
   appConnected: boolean;
+  bridgeLabel: string;
   onToggle: (path: string) => void;
   onToggleAll: () => void;
 }) {
-  const { apps, selectedApps, chosenCount, quittableCount, quittableBytes, allSelected, enabled, appConnected, onToggle, onToggleAll } = props;
+  const { apps, selectedApps, chosenCount, quittableCount, quittableBytes, allSelected, enabled, appConnected, bridgeLabel, onToggle, onToggleAll } = props;
   return (
     <>
       <div className="opt-h3-row">
@@ -383,7 +389,7 @@ function AppsList(props: {
       </div>
       <div className="opt-list">
         {quittableCount > 0 && (
-          <label className={`opt-item opt-all ${chosenCount ? "on" : ""}`} title={appConnected ? undefined : "Needs the ModelMatrix menu bar app"}>
+          <label className={`opt-item opt-all ${chosenCount ? "on" : ""}`} title={appConnected ? undefined : `Needs the ModelMatrix ${bridgeLabel.toLowerCase()}`}>
             <input
               type="checkbox"
               className="check"
@@ -413,7 +419,7 @@ function AppsList(props: {
             </div>
           );
           return quittable ? (
-            <label className={`opt-item ${checked ? "on" : ""}`} key={app.path} title={appConnected ? undefined : "Needs the ModelMatrix menu bar app"}>
+            <label className={`opt-item ${checked ? "on" : ""}`} key={app.path} title={appConnected ? undefined : `Needs the ModelMatrix ${bridgeLabel.toLowerCase()}`}>
               <input type="checkbox" className="check" checked={checked} disabled={!enabled} onChange={() => onToggle(app.path as string)} />
               {meta}
               <span className="opt-size mono">{bytes(app.bytes)}</span>
@@ -431,15 +437,15 @@ function AppsList(props: {
       </div>
       <div className="feed-small" style={{ marginTop: 6 }}>
         {appConnected
-          ? "Optimize never picks apps for you. Selected apps close the way they do with ⌘Q, so they can still ask to save your work."
-          : "Closing apps needs the ModelMatrix menu bar app. Open it to select apps here."}
+          ? `Optimize never picks apps for you. Selected apps close through the ${bridgeLabel.toLowerCase()}, so unsaved-work prompts can still appear.`
+          : `Closing apps needs the ModelMatrix ${bridgeLabel.toLowerCase()} and its quit-app capability.`}
       </div>
     </>
   );
 }
 
 function ItemRow({ item, checked, disabled, onToggle }: { item: OptimizeItem; checked: boolean; disabled: boolean; onToggle: () => void }) {
-  const kindLabel = item.kind === "ollama_model" ? "Ollama" : item.kind === "model_server" ? "Model server" : "macOS";
+  const kindLabel = item.kind === "ollama_model" ? "Ollama" : item.kind === "model_server" ? "Model server" : "System cache";
   return (
     <label className={`opt-item ${checked ? "on" : ""}`}>
       <input type="checkbox" className="check" checked={checked} disabled={disabled} onChange={onToggle} />
@@ -539,7 +545,7 @@ function OutcomeView({ outcome }: { outcome: Outcome }) {
       </div>
       {outcome.freed === 0 && (
         <div className="feed-small" style={{ marginTop: 8 }}>
-          macOS hands memory back gradually, so the free figure can keep rising for a few seconds.
+          The operating system may return memory gradually, so the free figure can keep rising for a few seconds.
         </div>
       )}
     </div>

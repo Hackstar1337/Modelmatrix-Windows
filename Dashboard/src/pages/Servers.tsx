@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import { api, post, remote } from "../lib/api";
 import { compact, num, seconds } from "../lib/format";
-import { useApp, usePoll } from "../lib/state";
+import { useApp, usePlatform, usePoll } from "../lib/state";
 import type { BenchmarkStatus, Gateway, ProfileStatus, StatusPayload } from "../lib/types";
 import { ProfileEditor } from "../components/ProfileEditor";
 import { Confirm, CopyButton, Empty, Modal, Notice, SectionCard, StatusPill, Switch } from "../components/ui";
@@ -252,6 +252,7 @@ function BenchmarkPanel({ benchmark, selected, gateway }: { benchmark?: Benchmar
 
 function GatewayForm({ gateway, onClose }: { gateway?: Gateway; onClose: () => void }) {
   const { bridgeCommand, toast } = useApp();
+  const { platform } = usePlatform();
   const [mode, setMode] = useState<"manual" | "pair">(gateway ? "manual" : "pair");
   const [form, setForm] = useState({
     name: gateway?.name ?? "",
@@ -337,7 +338,7 @@ function GatewayForm({ gateway, onClose }: { gateway?: Gateway; onClose: () => v
             <div className="field full">
               <label>Agent token</label>
               <input className="input mono" type="password" value={form.token} onChange={(e) => set("token", e.target.value)} placeholder={gateway?.has_token ? "unchanged" : "optional"} />
-              <span className="hint">Stored in your macOS Keychain by the menu bar app.</span>
+              <span className="hint">Stored in the {platform.credential_store} by the desktop bridge.</span>
             </div>
           </div>
         )}
@@ -348,6 +349,7 @@ function GatewayForm({ gateway, onClose }: { gateway?: Gateway; onClose: () => v
 
 function RemoteHost({ gateway }: { gateway: Gateway }) {
   const { bridgeCommand, toast, globalAction } = useApp();
+  const { platform } = usePlatform();
   const status = usePoll<StatusPayload>((signal) => api(remote(gateway.id, "/api/status"), { signal }), 5000, [gateway.id]);
   const [editing, setEditing] = useState(false);
   const [removing, setRemoving] = useState(false);
@@ -420,7 +422,7 @@ function RemoteHost({ gateway }: { gateway: Gateway }) {
       {removing && (
         <Confirm
           title={`Remove ${gateway.name}?`}
-          message="The host is removed from ModelMatrix and its token deleted from your Keychain. Models on that machine keep running."
+          message={`The host is removed from ModelMatrix and its token deleted from the ${platform.credential_store}. Models on that machine keep running.`}
           danger
           confirmLabel="Remove host"
           onClose={() => setRemoving(false)}
@@ -442,6 +444,7 @@ function RemoteHost({ gateway }: { gateway: Gateway }) {
 
 export function ServersPage({ editorRequest, clearEditorRequest }: { editorRequest: boolean; clearEditorRequest: () => void }) {
   const { status, statusError, globalAction, pending, lastActive, bridge, toast, refreshStatus } = useApp();
+  const { capabilities, bridgeLabel, localHostLabel } = usePlatform();
   const capture = usePoll<{ capture?: { profile: string; enabled: boolean; supported: boolean; port?: number }[] }>((signal) => api("/api/usage/settings", { signal }), 6000);
   const [selected, setSelected] = useState<string[]>([]);
   const [search, setSearch] = useState("");
@@ -469,7 +472,7 @@ export function ServersPage({ editorRequest, clearEditorRequest }: { editorReque
       <div className="page-title">
         <div>
           <h1>Models & Servers</h1>
-          <p>Start, stop, switch and benchmark every model profile, on this Mac and on remote hosts.</p>
+          <p>Start, stop, switch and benchmark every model profile on {localHostLabel} and supported remote hosts.</p>
         </div>
         <div className="btn-row">
           <button className="btn" onClick={() => refreshStatus()}>
@@ -563,16 +566,18 @@ export function ServersPage({ editorRequest, clearEditorRequest }: { editorReque
       <section id="remote-hosts" className="section" style={{ marginTop: 28 }}>
         <div className="toolbar">
           <div className="card-title">Remote hosts</div>
-          <button className="btn" onClick={() => setAddingHost(true)} disabled={!bridge?.app_connected}>
+          <button className="btn" onClick={() => setAddingHost(true)} disabled={!bridge?.app_connected || !capabilities.remote_gateways}>
             <Link2 size={14} /> Add remote host
           </button>
         </div>
-        {!bridge?.app_connected ? (
-          <Notice kind="warn">Remote hosts are managed through the ModelMatrix menu bar app (it keeps SSH tunnels and tokens in your Keychain). Open the app to see and control them here.</Notice>
+        {!capabilities.remote_gateways ? (
+          <Notice kind="info">Remote gateways are unavailable on this controller. Local profiles and usage remain available.</Notice>
+        ) : !bridge?.app_connected ? (
+          <Notice kind="warn">Remote hosts are managed through the ModelMatrix {bridgeLabel.toLowerCase()} (it keeps SSH tunnels and tokens in the protected credential store). Connect it to see and control them here.</Notice>
         ) : bridge.gateways.length ? (
           bridge.gateways.map((g) => <RemoteHost key={g.id} gateway={g} />)
         ) : (
-          <Empty title="No remote hosts">Add a Linux GPU box or another Mac to control its models from here.</Empty>
+          <Empty title="No remote hosts">Add a supported remote agent to control its models from here.</Empty>
         )}
       </section>
 

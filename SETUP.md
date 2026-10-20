@@ -505,3 +505,8 @@ To keep this reusable:
 - treat external tools like Droid as optional integrations, not required features
 - ship one backend adapter as an example
 - let other people plug in their own runtime stack
+
+
+## Windows controller and distribution
+
+The Windows distribution is a separate per-user entry point around the shared HTTP/dashboard contracts: `Scripts/install-windows.ps1` stages code under `%LOCALAPPDATA%\Programs\ModelMatrix`, while mutable profiles, downloads, logs, run identity, and history stay under `%LOCALAPPDATA%\ModelMatrix`. `start-windows.ps1` and `stop-windows.ps1` use a recorded executable/command/creation identity rather than PID-only process control. Read [Windows/README.md](Windows/README.md) for the supported PowerShell flow. Windows verification is intentionally limited to static-install validation and an optional local HTTP health probe; it is not a claim that model runtimes, drivers, or Apple-only engines are available.
