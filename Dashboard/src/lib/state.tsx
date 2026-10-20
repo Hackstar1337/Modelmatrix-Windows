@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { api, ApiError, post, query, remote } from "./api";
+import { api, ApiError, post, remote } from "./api";
 import { platformContext, type PlatformContext } from "./platform";
+import { routes } from "./routes";
 import type { BridgeState, DashboardInfo, HostMetrics, OllamaStatus, Overview, StatusPayload } from "./types";
 
 /* ---------------- Polling ---------------- */
@@ -202,16 +203,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [dismiss],
   );
 
-  const info = usePoll<DashboardInfo>((signal) => api("/api/dashboard/info", { signal }), 30000);
-  const status = usePoll<StatusPayload>((signal) => api("/api/status", { signal }), Math.max(2000, settings.refreshMs));
+  const info = usePoll<DashboardInfo>((signal) => api(routes.dashboard.info().path, { signal }), 30000);
+  const status = usePoll<StatusPayload>((signal) => api(routes.status().path, { signal }), Math.max(2000, settings.refreshMs));
   const overview = usePoll<Overview>(
-    (signal) => api(`/api/usage/overview${query({ range: settings.range, host: settings.host, tier: settings.tier })}`, { signal }),
+    (signal) => api(routes.overview({ range: settings.range, host: settings.host, tier: settings.tier }).path, { signal }),
     settings.refreshMs,
     [settings.range, settings.host, settings.tier],
   );
-  const metrics = usePoll<HostMetrics>((signal) => api("/api/host/metrics", { signal }), 3000);
-  const bridge = usePoll<BridgeState>((signal) => api("/api/bridge/state", { signal }), 5000);
-  const ollama = usePoll<OllamaStatus>((signal) => api("/api/ollama/status", { signal }), 10000);
+  const metrics = usePoll<HostMetrics>((signal) => api(routes.metrics().path, { signal }), 3000);
+  const bridge = usePoll<BridgeState>((signal) => api(routes.bridge.state().path, { signal }), 5000);
+  const ollama = usePoll<OllamaStatus>((signal) => api(routes.ollama().path, { signal }), 10000);
 
   const base = (gateway?: string) => (path: string) => (gateway ? remote(gateway, path) : path);
 
@@ -220,7 +221,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const key = gateway ? `${gateway}:${profile}` : profile;
       setPending((p) => ({ ...p, [key]: pendingLabel[action] }));
       try {
-        await post(base(gateway)(`/api/${action}`), { profile });
+        const contract = routes.action(action, profile);
+        await post(base(gateway)(contract.path), contract.body);
         if (action === "switch" && !gateway) setLastActiveLocal(profile);
         const verb = { start: "Started", stop: "Stopped", restart: "Restarted", switch: "Activated" }[action];
         toast(`${verb} ${profile}`, "ok");
@@ -253,7 +255,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
       setPending((p) => ({ ...p, __all: "STOPPING" }));
       try {
-        await post(base(gateway)("/api/stop-all"), {});
+        const contract = routes.stopAll();
+        await post(base(gateway)(contract.path), contract.body);
         toast("Stopped all models", "ok");
       } catch (e) {
         toast(`Stop all failed: ${(e as Error).message}`, "err");
@@ -273,9 +276,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const startBenchmark = useCallback(
     async (profiles: string[] | null, suite = "quick", options: { allow_concurrent?: boolean; keep_running?: boolean } = {}, gateway?: string) => {
       try {
-        const body: Record<string, unknown> = { suite, ...options };
-        if (profiles && profiles.length) body.profiles = profiles;
-        await post(base(gateway)("/api/benchmark/start"), body);
+        const contract = routes.benchmark(profiles, suite, options);
+        await post(base(gateway)(contract.path), contract.body);
         toast(profiles?.length ? `Benchmark started for ${profiles.join(", ")}` : "Benchmark started for all profiles", "ok");
       } catch (e) {
         toast(`Benchmark failed to start: ${(e as Error).message}`, "err");
@@ -289,12 +291,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const bridgeCommand = useCallback(
     async (type: string, payload: Record<string, unknown> = {}) => {
-      const command = await post<{ id: string; status: string }>("/api/bridge/commands", { type, payload });
+      const commandRoute = routes.bridge.command(type, payload);
+      const command = await post<{ id: string; status: string }>(commandRoute.path, commandRoute.body);
       // Wait for the menu bar app to report back (it polls every couple of seconds).
       const deadline = Date.now() + 130_000;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 900));
-        const current = await api<{ status: string; message?: string; result?: unknown }>(`/api/bridge/commands/${command.id}`);
+        const current = await api<{ status: string; message?: string; result?: unknown }>(routes.bridge.commandStatus(command.id).path);
         if (current.status === "done") {
           bridge.refresh();
           return current;

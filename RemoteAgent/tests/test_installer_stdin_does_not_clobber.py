@@ -13,6 +13,7 @@ AGENT_DIR = Path(__file__).resolve().parents[1]
 
 
 class InstallerStdinTests(unittest.TestCase):
+    @unittest.skipUnless(os.name != "nt", "POSIX bash installer fixture; Windows installer coverage uses native Windows tests")
     def test_stdin_install_keeps_pushed_modules_over_home_leftovers(self) -> None:
         installer = (AGENT_DIR / "install-remote-agent.sh").read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as tmp:
@@ -43,6 +44,7 @@ class InstallerStdinTests(unittest.TestCase):
                 env=env,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=30,
                 check=False,
             )

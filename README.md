@@ -4,11 +4,11 @@
   <img src="Resources/Brand/title-light.svg" alt="ModelMatrix" width="560">
 </picture>
 <p>
-  <em><strong>One control center for every local LLM on your Mac and your GPU boxes.</strong></em><br/>
-  <strong>Menu bar app + web dashboard at <code>http://localhost:7700</code>.</strong>
+  <em><strong>Modelmatrix-Windows: local LLM control on Windows 10/11, with the original Mac/Linux sources preserved.</strong></em><br/>
+  <strong>Windows Dashboard + native tray at <code>http://localhost:7700</code>.</strong>
 </p>
 <p>
-  <a href="https://github.com/Hackstar1337/ModelMatrix/releases/latest"><img alt="Download DMG" src="https://img.shields.io/badge/Download-DMG-FF6A1A?style=for-the-badge&logo=apple&logoColor=white"></a>
+  <a href="Windows/README.md"><strong>Windows installation and setup</strong></a>
   <a href="DASHBOARD.md"><img alt="Web dashboard" src="https://img.shields.io/badge/Web-Dashboard-111111?style=for-the-badge&logo=googlechrome&logoColor=white"></a>
   <a href="SETUP.md"><img alt="Docs" src="https://img.shields.io/badge/Docs-SETUP.md-1F6FEB?style=for-the-badge&logo=readthedocs&logoColor=white"></a>
 </p>
@@ -23,7 +23,25 @@
 
 ---
 
-ModelMatrix is a macOS control center for local language models. It starts, stops and switches runtimes such as `llama.cpp`, MLX, Ollama, vLLM, SGLang, TGI, LM Studio and many more, checks that each endpoint actually answers, tracks every request your apps make, and manages remote GPU hosts over SSH or Tailscale.
+## Windows quick start
+
+This repository contains the implemented Windows port of [ModelMatrix](https://github.com/Hackstar1337/ModelMatrix). It reuses the original Dashboard and Python agent, with native Windows lifecycle, metrics, credentials, tray and installation scripts. Windows 11 was tested directly; Windows 10 is targeted but was not tested on a Windows 10 device.
+
+```powershell
+git clone https://github.com/Hackstar1337/Modelmatrix-Windows.git
+cd .\Modelmatrix-Windows
+.\Scripts\install-windows.cmd -NoBuild
+.\Scripts\start-windows.cmd -NoBrowser
+.\Scripts\verify-windows.cmd
+```
+
+Open **http://127.0.0.1:7700/**. Python 3.10+ and a Windows-compatible model/runtime are required. The committed static Dashboard permits `-NoBuild`; Node/pnpm are needed only to rebuild it.
+
+Read the [complete Windows guide](Windows/README.md), [compatibility changes](Windows/COMPATIBILITY_CHANGES.md), and [verified test report](Windows/TEST_REPORT.md). Apple-only MLX/Metal cannot run on Windows; native Windows alternatives and remote Linux hosts are supported without pretending platform-only features are portable. The original upstream repository was not modified.
+
+## Original Mac and Linux product
+
+ModelMatrix's original macOS control center starts, stops and switches runtimes such as `llama.cpp`, MLX, Ollama, vLLM, SGLang, TGI, LM Studio and many more, checks that each endpoint actually answers, tracks every request your apps make, and manages remote GPU hosts over SSH or Tailscale.
 
 You can drive it two ways, and both offer the same features: a native **SwiftUI menu bar app**, and a **web dashboard** that the bundled controller serves on `http://localhost:7700`.
 

@@ -1,4 +1,5 @@
-import { api, post, query } from "./api";
+import { api, post } from "./api";
+import { routes } from "./routes";
 
 export type ConnectTargetId = "kilo" | "opencode" | "manual";
 
@@ -108,17 +109,17 @@ export interface ConnectListPayload {
   operations?: unknown[];
 }
 
-export const connectProfiles = (signal?: AbortSignal) => api<ConnectProfilesPayload>("/api/connect/profiles", { signal });
-export const connectTargets = (signal?: AbortSignal) => api<{ targets: ConnectTarget[] }>("/api/connect/targets", { signal });
+export const connectProfiles = (signal?: AbortSignal) => api<ConnectProfilesPayload>(routes.connect.profiles().path, { signal });
+export const connectTargets = (signal?: AbortSignal) => api<{ targets: ConnectTarget[] }>(routes.connect.targets().path, { signal });
 export const connectDetails = (profile: string, connection?: string, signal?: AbortSignal) =>
-  api<ConnectDetails>(`/api/connect/details${query({ profile, connection })}`, { signal });
-export const connectList = (signal?: AbortSignal) => api<ConnectListPayload>("/api/connect/list", { signal });
+  api<ConnectDetails>(routes.connect.details(profile, connection).path, { signal });
+export const connectList = (signal?: AbortSignal) => api<ConnectListPayload>(routes.connect.list().path, { signal });
 export const connectPlan = (profile: string, target: ConnectTargetId, makeDefault = false) =>
-  post<{ plan: ConnectPlan; existing?: boolean }>("/api/connect/plan", { profile, target, make_default: makeDefault });
-export const connectApply = (plan_id: string) => post<{ connection: ConnectConnection; operation_id?: string; existing?: boolean }>("/api/connect/apply", { plan_id, approved: true });
-export const connectVerify = (id: string) => post<{ connection: ConnectConnection; message: string }>("/api/connect/verify", { id });
+  post<{ plan: ConnectPlan; existing?: boolean }>(routes.connect.plan(profile, target, makeDefault).path, routes.connect.plan(profile, target, makeDefault).body);
+export const connectApply = (plan_id: string) => post<{ connection: ConnectConnection; operation_id?: string; existing?: boolean }>(routes.connect.apply(plan_id).path, routes.connect.apply(plan_id).body);
+export const connectVerify = (id: string) => post<{ connection: ConnectConnection; message: string }>(routes.connect.verify(id).path, routes.connect.verify(id).body);
 export const connectDisconnect = (id: string) =>
-  post<{ connection: ConnectConnection; message: string }>("/api/connect/disconnect", { id, remove_config: true, approved: true });
-export const connectUndo = (id: string) => post<{ connection: ConnectConnection; message: string }>("/api/connect/undo", { id, approved: true });
+  post<{ connection: ConnectConnection; message: string }>(routes.connect.disconnect(id).path, routes.connect.disconnect(id).body);
+export const connectUndo = (id: string) => post<{ connection: ConnectConnection; message: string }>(routes.connect.undo(id).path, routes.connect.undo(id).body);
 /** Secret retrieval is intentionally isolated: callers must make an explicit, user-visible action. */
-export const connectSecret = (id: string) => post<ConnectSecret>("/api/connect/key", { id, approved: true });
+export const connectSecret = (id: string) => post<ConnectSecret>(routes.connect.secret(id).path, routes.connect.secret(id).body);

@@ -301,6 +301,10 @@ export interface DashboardCapabilities {
   open_folders: boolean;
   quit_apps: boolean;
   purge_file_cache: boolean;
+  /** Controller-backed model/Ollama cleanup is available on Windows too. */
+  optimize?: boolean;
+  /** Browser copy is the normal path; the Windows bridge can report this too. */
+  clipboard?: boolean;
   keep_awake: boolean;
   remote_gateways: boolean;
   capture: boolean;
@@ -336,12 +340,12 @@ export interface MemorySnapshot {
   total_bytes: number;
   used_bytes: number;
   app_bytes: number;
-  wired_bytes: number;
-  compressed_bytes: number;
-  cached_bytes: number;
+  wired_bytes?: number;
+  compressed_bytes?: number;
+  cached_bytes?: number;
   free_bytes: number;
-  swap_used_bytes: number;
-  swap_total_bytes: number;
+  swap_used_bytes?: number;
+  swap_total_bytes?: number;
   pressure: "normal" | "warning" | "critical";
 }
 
@@ -362,7 +366,9 @@ export interface AppMemory {
   path?: string;
   bytes: number;
   processes: number;
-  pid: number;
+  pid?: number;
+  creation_time?: number;
+  hwnd_ids?: number[];
   quittable: boolean;
   /** Why it cannot be quit: "command-line tool", "part of macOS" or "background app". */
   reason?: string;

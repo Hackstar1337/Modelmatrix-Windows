@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import socket
+import subprocess
 import threading
 import time
 import urllib.error
@@ -48,7 +49,12 @@ from agent_core import (
 )
 
 PORT_CLAIM_DIR_RE = re.compile(r"^\d{2,5}$")
-PORT_CLAIM_MARKERS = ("flags.env", "launch.sh", "start.sh", "run.sh", "serve.sh", "ctrl.sh")
+PORT_CLAIM_MARKERS = (
+    "flags.env", "launch.sh", "start.sh", "run.sh", "serve.sh", "ctrl.sh",
+    "launch.cmd", "start.cmd", "run.cmd", "serve.cmd", "ctrl.cmd",
+    "launch.bat", "start.bat", "run.bat", "serve.bat", "ctrl.bat",
+    "launch.ps1", "start.ps1", "run.ps1", "serve.ps1", "ctrl.ps1",
+)
 
 
 # Live cmdlines often mention ``/run/user/<uid>/...``. The uid looks like a
@@ -1069,7 +1075,12 @@ _CLAIM_FLAG_EXPORT_KEYS = (
     "PORT",
     "HOST",
 )
-_CLAIM_LAUNCH_SCRIPTS = ("ctrl.sh", "launch.sh", "start.sh", "run.sh", "serve.sh")
+_CLAIM_LAUNCH_SCRIPTS = (
+    "ctrl.sh", "launch.sh", "start.sh", "run.sh", "serve.sh",
+    "ctrl.cmd", "launch.cmd", "start.cmd", "run.cmd", "serve.cmd",
+    "ctrl.bat", "launch.bat", "start.bat", "run.bat", "serve.bat",
+    "ctrl.ps1", "launch.ps1", "start.ps1", "run.ps1", "serve.ps1",
+)
 
 
 def _memoized_is_dir(memo: dict[Path, bool], path: Path) -> bool:
@@ -1129,13 +1140,23 @@ def _claim_start_command(directory: Path, is_regular_file) -> str:
     for candidate in _CLAIM_LAUNCH_SCRIPTS:
         script = directory / candidate
         if _is_executable_file(script, is_regular_file):
-            quoted = shlex.quote(str(script))
-            return f"{quoted} start" if candidate == "ctrl.sh" else quoted
+            quoted = _claim_command_quote(str(script))
+            return f"{quoted} start" if candidate.startswith("ctrl.") else quoted
     return ""
 
 
+def _claim_command_quote(value: str) -> str:
+    if IS_WINDOWS:
+        return subprocess.list2cmdline([value])
+    return shlex.quote(value)
+
+
 def _is_executable_file(path: Path, is_regular_file=path_is_regular_file) -> bool:
-    return bool(is_regular_file(path) and os.access(path, os.X_OK))
+    if not is_regular_file(path):
+        return False
+    if IS_WINDOWS and path.suffix.lower() in {".cmd", ".bat", ".ps1"}:
+        return True
+    return os.access(path, os.X_OK)
 
 
 def _display_from_model_hint(model_hint: str) -> str:
@@ -1956,7 +1977,21 @@ def _claim_profile_values(claim: dict[str, Any], port: str) -> dict[str, str]:
         model_raw=model_raw,
         model_file=model_file,
     )
+    shell = _claim_shell_for_start(start)
+    if shell:
+        values["SHELL"] = shell
     return _apply_claim_launch_flags(values, start, stop)
+
+
+def _claim_shell_for_start(start: str) -> str:
+    if not IS_WINDOWS:
+        return ""
+    lowered = start.lower()
+    if any(suffix in lowered for suffix in (".cmd", ".bat")):
+        return "cmd"
+    if ".ps1" in lowered:
+        return "powershell"
+    return ""
 
 
 def _apply_claim_launch_flags(values: dict[str, str], start: str, stop: str) -> dict[str, str]:

@@ -4,6 +4,8 @@
 
 The original repository was cloned from `Hackstar1337/ModelMatrix` at commit `214863ac289c0197a593bd9d61a1d915e134c356` (`Add reviewed model-to-app connections`). Changes are on the local `windows-support` branch; no upstream branch was changed or force-pushed.
 
+The completed Windows source is published separately at `Hackstar1337/Modelmatrix-Windows`. Original Git history and MIT license are preserved.
+
 Inspection found a macOS SwiftUI/AppKit application and controller, a portable React Dashboard, and a stdlib Python RemoteAgent with POSIX assumptions. This was not simply a Linux application needing path substitutions. SwiftUI/AppKit/Apple Network/Security frameworks and macOS packaging are not native Windows dependencies. The Windows implementation therefore reuses the Dashboard and RemoteAgent behind a Python local controller and optional Windows tray, while preserving the original Mac product and Linux agent architecture.
 
 ## Implemented changes
@@ -23,6 +25,8 @@ Inspection found a macOS SwiftUI/AppKit application and controller, a portable R
 | Frontend and dependencies | Platform/capability-aware labels/actions, matching API shapes, frozen lockfile, pinned package manager, approved esbuild build dependency, build script without nested bare `pnpm` invocation (works with Corepack-only installs). |
 | Configuration and examples | Real uppercase-key profiles accepted by the original loader, structured argv with full executable paths preserved, UTF-8 BOM/CRLF support for Windows editors and settings/token readers, valid Windows example profiles. |
 | Regression protection | Windows stdlib/API/capture/client/security tests, genuine native child-tree test, profile/BOM tests, Dashboard platform tests and Windows CI workflow. |
+
+The expanded audit also fixed concurrent byte-lock initialization, lost HOST/PORT expansion, remote Windows HF factory selection, usage-enabled/previous-period SQL behavior, capture disable/restart binding, JSONC string preservation, bracketed IPv6 URLs, tray native switches/CMD quoting, data-URL font CSP, authenticated startup/stop, uninstall shortcut ownership, caller-pipe inheritance and HTTP-handler/SQLite shutdown races. These are implemented changes with executable regressions, not documentation-only proposals.
 
 ## Architecture and preservation
 

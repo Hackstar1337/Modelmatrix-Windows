@@ -7,6 +7,7 @@ export interface PlatformContext {
   localHostLabel: string;
   folderLabel: string;
   bridgeLabel: string;
+  desktopActionsAvailable: boolean;
 }
 
 const macPlatform: PlatformInfo = {
@@ -20,6 +21,8 @@ const macCapabilities: DashboardCapabilities = {
   open_folders: true,
   quit_apps: true,
   purge_file_cache: true,
+  optimize: true,
+  clipboard: true,
   keep_awake: true,
   remote_gateways: true,
   capture: true,
@@ -28,11 +31,13 @@ const macCapabilities: DashboardCapabilities = {
 };
 
 const windowsCapabilities: DashboardCapabilities = {
-  open_folders: false,
-  quit_apps: false,
+  open_folders: true,
+  quit_apps: true,
   purge_file_cache: false,
-  keep_awake: false,
-  remote_gateways: false,
+  optimize: true,
+  clipboard: true,
+  keep_awake: true,
+  remote_gateways: true,
   capture: true,
   connect_apps: true,
   huggingface: true,
@@ -54,6 +59,8 @@ export function platformContext(info?: DashboardInfo): PlatformContext {
     localHostLabel: platform.local_host_label,
     folderLabel: isWindows ? "Open in Explorer" : "Open in Finder",
     bridgeLabel: isWindows ? "Desktop bridge" : "Menu bar app",
+    // Desktop navigation is a controller capability, not an OS exclusion.
+    desktopActionsAvailable: capabilities.remote_gateways || capabilities.open_folders || capabilities.quit_apps,
   };
 }
 

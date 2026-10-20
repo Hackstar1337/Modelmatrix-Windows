@@ -24,6 +24,7 @@ else:
 
     kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]; kernel32.GetModuleHandleW.restype = wintypes.HINSTANCE
     kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]; kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]; kernel32.CloseHandle.restype = wintypes.BOOL
     kernel32.GetLastError.argtypes = []; kernel32.GetLastError.restype = wintypes.DWORD
     user32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]; user32.CreateWindowExW.restype = wintypes.HWND
     user32.CreatePopupMenu.argtypes = []; user32.CreatePopupMenu.restype = wintypes.HMENU
@@ -50,6 +51,18 @@ else:
 
     def _root() -> Path: return Path(os.environ.get("MODELMATRIX_DATA_ROOT") or (Path(os.environ.get("LOCALAPPDATA", Path.home())) / "ModelMatrix"))
     def _endpoint() -> str: return os.environ.get("MODELMATRIX_CONTROLLER_URL", "http://127.0.0.1:7700")
+    def _auth_headers() -> dict[str, str]:
+        headers = {"Accept": "application/json"}
+        token = os.environ.get("MODELMATRIX_TOKEN")
+        if not token:
+            try:
+                from modelmatrixctl import _secret
+                token = _secret(_root())
+            except Exception:
+                token = None
+        if token and not any(char in token for char in "\r\n"):
+            headers["Authorization"] = "Bearer " + token
+        return headers
     def _controller_launcher() -> Path:
         configured = os.environ.get("MODELMATRIX_CONTROLLER_LAUNCHER")
         if configured: return Path(configured)
@@ -57,26 +70,41 @@ else:
         if installed.is_file(): return installed
         return Path(__file__).resolve().parents[1] / "Scripts" / "start-windows.cmd"
     def _status() -> dict:
-        req = Request(_endpoint().rstrip("/") + "/api/status", headers={"Accept": "application/json"})
+        req = Request(_endpoint().rstrip("/") + "/api/status", headers=_auth_headers())
         with urlopen(req, timeout=3) as response: return json.loads(response.read().decode("utf-8"))
+    _launching = False
     def _ensure_controller() -> bool:
+        global _launching
         try:
             _status(); return True
         except Exception:
+            if _launching: return False
             launcher = _controller_launcher()
             if not launcher.is_file(): return False
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            try: subprocess.Popen([str(launcher), "--no-browser"], cwd=str(launcher.parent), creationflags=flags)
-            except OSError: return False
+            try:
+                _launching = True
+                if launcher.suffix.lower() in {".cmd", ".bat"}:
+                    command = '"' + os.environ.get("COMSPEC", "cmd.exe") + '" /d /s /c ""' + str(launcher) + '" -NoBrowser"'
+                elif launcher.suffix.lower() == ".ps1":
+                    command = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(launcher), "-NoBrowser"]
+                else:
+                    command = [str(launcher), "--no-browser"]
+                subprocess.Popen(command, cwd=str(launcher.parent), creationflags=flags)
+            except OSError:
+                _launching = False
+                return False
             deadline = time.monotonic() + 12
             while time.monotonic() < deadline:
                 time.sleep(0.25)
-                try: _status(); return True
+                try:
+                    _status(); _launching = False; return True
                 except Exception: pass
+            _launching = False
             return False
-    def _invoke(command: str, *extra: str) -> None:
+    def _invoke(command: str, *extra: str) -> bool:
         from modelmatrixctl import main as cli_main
-        cli_main([command, *extra, "--json"])
+        return cli_main([command, *extra, "--json"]) == 0
     def _profiles(status: dict) -> list[str]:
         rows = status.get("statuses") or status.get("profiles") or []
         if isinstance(rows, dict): return sorted(str(k) for k in rows)
@@ -117,7 +145,9 @@ else:
             point = wintypes.POINT(); user32.GetCursorPos(ctypes.byref(point)); user32.SetForegroundWindow(self.hwnd); user32.TrackPopupMenu(self.menu, 0, point.x, point.y, 0, self.hwnd, None); user32.PostMessageW(self.hwnd, 0, 0, 0)
         def run(self) -> int:
             self._mutex = kernel32.CreateMutexW(None, True, "Local\\ModelMatrixTray")
-            if not self._mutex or kernel32.GetLastError() == 183: return 0
+            if not self._mutex or kernel32.GetLastError() == 183:
+                if self._mutex: kernel32.CloseHandle(self._mutex); self._mutex = None
+                return 0
             _ensure_controller()
             instance = kernel32.GetModuleHandleW(None); cls_name = "ModelMatrixTrayWindow"
             self._proc = WNDPROC(self._wndproc); wc = WNDCLASSEXW(ctypes.sizeof(WNDCLASSEXW), 0, self._proc, 0, 0, instance, user32.LoadIconW(None, ctypes.c_void_p(32512)), None, None, None, cls_name, None)
@@ -128,6 +158,8 @@ else:
             if not self.no_browser: webbrowser.open(_endpoint())
             msg = wintypes.MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0: user32.TranslateMessage(ctypes.byref(msg)); user32.DispatchMessageW(ctypes.byref(msg))
+            if self.menu: user32.DestroyMenu(self.menu); self.menu = None
+            if self._mutex: kernel32.CloseHandle(self._mutex); self._mutex = None
             return int(msg.wParam)
     def main(argv: list[str] | None = None) -> int:
         p = argparse.ArgumentParser(description="ModelMatrix native Windows tray companion"); p.add_argument("--no-browser", action="store_true"); args = p.parse_args(argv); return Tray(args.no_browser).run()

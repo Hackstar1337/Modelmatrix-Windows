@@ -17,9 +17,13 @@ def _secret(root: Path, token_file: Path | None = None) -> str | None:
         token = token_file.read_text(encoding="utf-8-sig").strip()
         if not token:
             raise ValueError("auth token file is empty")
+        if any(char in token for char in "\r\n"):
+            raise ValueError("auth token file contains an invalid newline")
         return token
     explicit = os.environ.get("MODELMATRIX_TOKEN")
     if explicit:
+        if any(char in explicit for char in "\r\n"):
+            raise ValueError("MODELMATRIX_TOKEN contains an invalid newline")
         return explicit
     try:
         from secrets_store import SecretStore  # type: ignore
@@ -66,12 +70,18 @@ def request(endpoint: str, method: str, path: str, payload: dict | None, root: P
         with opener.open(req, timeout=timeout) as response:
             raw = response.read()
             parsed = json.loads(raw.decode("utf-8")) if raw else {}
-            return parsed if isinstance(parsed, dict) else {"value": parsed}
+            result = parsed if isinstance(parsed, dict) else {"value": parsed}
+            if result.get("ok") is False or ("error" in result and method != "GET"):
+                raise RuntimeError("controller reported an unsuccessful operation")
+            return result
     except HTTPError as error:
         raw = error.read().decode("utf-8", "replace")
         try: details = json.loads(raw)
         except json.JSONDecodeError: details = {"error": raw or error.reason}
-        raise RuntimeError(f"controller returned HTTP {error.code}: {details}") from error
+        safe = json.dumps(details, ensure_ascii=False)
+        if token and token in safe:
+            safe = safe.replace(token, "[redacted]")
+        raise RuntimeError(f"controller returned HTTP {error.code}: {safe}") from error
     except (URLError, TimeoutError, OSError) as error:
         raise RuntimeError(f"controller is unreachable at {endpoint}: {error}") from error
 
@@ -125,7 +135,11 @@ def main(argv: list[str] | None = None) -> int:
         method, path, payload = _operation(args)
         plan = {"method": method, "path": path, "payload": payload, "endpoint": args.endpoint}
         if dry_run: result = {"ok": True, "dry_run": True, **plan}
-        else: result = {"ok": True, **request(args.endpoint, method, path, payload, args.root, auth_token_file=args.auth_token_file)}
+        else:
+            response = request(args.endpoint, method, path, payload, args.root, auth_token_file=args.auth_token_file)
+            if response.get("ok") is False or ("error" in response and method != "GET"):
+                raise RuntimeError("controller reported an unsuccessful operation")
+            result = {"ok": True, **response}
         if json_mode: print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
         else: _human(result)
         return 0

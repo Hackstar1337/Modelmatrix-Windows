@@ -136,7 +136,10 @@ def _class_name(hwnd: HWND, api: dict[str, Any]) -> str:
 
 
 def _window_identity(hwnd: int | HWND, api: dict[str, Any]) -> dict[str, Any] | None:
-    handle = HWND(int(hwnd))
+    raw_handle = getattr(hwnd, "value", hwnd)
+    if raw_handle is None:
+        return None
+    handle = HWND(int(raw_handle))
     pid = wintypes.DWORD()
     if not api["GetWindowThreadProcessId"](handle, ctypes.byref(pid)) or not pid.value:
         return None
@@ -148,7 +151,7 @@ def _window_identity(hwnd: int | HWND, api: dict[str, Any]) -> dict[str, Any] | 
 
 def _is_system_path(path: str) -> bool:
     normalized = os.path.normcase(os.path.abspath(path)).replace("/", "\\")
-    windows = os.path.normcase(os.environ.get("WINDIR", r"C:\\Windows")).replace("/", "\\").rstrip("\\")
+    windows = os.path.normcase(os.environ.get("WINDIR", r"C:\Windows")).replace("/", "\\").rstrip("\\")
     return normalized == windows or normalized.startswith(windows + "\\")
 
 

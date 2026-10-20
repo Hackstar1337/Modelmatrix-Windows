@@ -113,7 +113,9 @@ def _profile_name(value: Any) -> str:
     if value.strip() != value or value.endswith((".", " ")) or ".." in value or "\\" in value or "/" in value:
         raise UsageError("profile contains an unsafe path character")
     reserved = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
-    if value.casefold() in reserved:
+    # Windows device names remain reserved when an extension is appended;
+    # profile names become filenames such as ``CON.foo.env``.
+    if value.casefold().split(".", 1)[0] in reserved:
         raise UsageError("profile uses a reserved Windows device name")
     return value
 
@@ -419,7 +421,9 @@ class ProfileModule:
             return 200, {"profile": name, "deleted": True}
         if path == "/api/profiles/capture" and method == "POST":
             name = _profile_name(body.get("profile", ""))
-            enabled = bool(body.get("enabled", False))
+            enabled = body.get("enabled", False)
+            if not isinstance(enabled, bool):
+                raise UsageError("enabled must be a boolean")
             return 200, self.service.capture(name, enabled)
         return None
 
@@ -464,6 +468,16 @@ class UsageModule:
           "avg_tps":sum(speeds)/len(speeds) if speeds else None,"avg_ttft_ms":sum(ttft)/len(ttft) if ttft else None,"avg_duration_ms":sum(durations)/len(durations) if durations else None,
           "avg_prompt_tokens":prompt/len(rows) if rows else 0,"p50_ttft_ms":pct(ttft,.5),"p95_ttft_ms":pct(ttft,.95),"p50_tps":pct(speeds,.5),"peak_tps":max(speeds) if speeds else None,
           "previous":{"requests":0,"tokens":0,"avg_tps":None,"avg_ttft_ms":None}}
+    def _previous(self, range_key, tier, host):
+        seconds = {"1h":3600,"24h":86400,"7d":604800,"30d":2592000}.get(range_key)
+        if seconds is None:
+            return {"requests":0,"tokens":0,"avg_tps":None,"avg_ttft_ms":None}
+        now = time.time()
+        rows = [self._norm(r) for r in self._rows("all", tier, host)
+                if now-2*seconds <= float(r.get("started_at") or 0) < now-seconds]
+        value = self._summary(rows, "all")
+        return {"requests":value["requests"], "tokens":value["total_tokens"],
+                "avg_tps":value["avg_tps"], "avg_ttft_ms":value["avg_ttft_ms"]}
     def _models(self, rows):
         groups={}
         for r in rows: groups.setdefault(r.get("model") or r.get("model_requested") or "unknown",[]).append(r)
@@ -498,8 +512,11 @@ class UsageModule:
             allrows=[self._norm(r) for r in self._rows("all",tier,host)]
             hs={}
             for r in rows: hs.setdefault(r.get("host") or "local",[]).append(r)
-            return 200,{"summary":self._summary(rows,range_key),"totals":self._summary(allrows,"all")|{"requests_24h":self._summary([self._norm(x) for x in self._rows("24h",tier,host)],"24h")["requests"],"tokens_24h":self._summary([self._norm(x) for x in self._rows("24h",tier,host)],"24h")["total_tokens"],"active_clients":len({x.get("client_id") for x in allrows if (x.get("started_at") or 0)>time.time()-300}),"requests_per_minute":self._summary([self._norm(x) for x in self._rows("1h",tier,host)],"1h")["requests"]/60},"host_stats":[{"host":h,"requests":len(v),"last_request":max(x.get("started_at") or 0 for x in v)} for h,v in hs.items()],"timeseries":self._timeseries(rows,range_key),"models":self._models(rows),"clients":self._clients(rows)[:12],"recent":[self._norm(x) for x in self._rows(range_key,tier,host,limit=30)],"in_flight":relay.inflight_rows(),"last_id":relay.store.count(),"hosts":sorted(hs),"relay":relay.status(),"generated_at":time.time()}
-        if path=="/api/usage/summary" and method=="GET": return 200,self._summary(rows,range_key)
+            summary=self._summary(rows,range_key); summary["previous"]=self._previous(range_key,tier,host)
+            return 200,{"summary":summary,"totals":self._summary(allrows,"all")|{"requests_24h":self._summary([self._norm(x) for x in self._rows("24h",tier,host)],"24h")["requests"],"tokens_24h":self._summary([self._norm(x) for x in self._rows("24h",tier,host)],"24h")["total_tokens"],"active_clients":len({x.get("client_id") for x in allrows if (x.get("started_at") or 0)>time.time()-300}),"requests_per_minute":self._summary([self._norm(x) for x in self._rows("1h",tier,host)],"1h")["requests"]/60},"host_stats":[{"host":h,"requests":len(v),"last_request":max(x.get("started_at") or 0 for x in v)} for h,v in hs.items()],"timeseries":self._timeseries(rows,range_key),"models":self._models(rows),"clients":self._clients(rows)[:12],"recent":[self._norm(x) for x in self._rows(range_key,tier,host,limit=30)],"in_flight":relay.inflight_rows(),"last_id":relay.store.count(),"hosts":sorted(hs),"relay":relay.status(),"generated_at":time.time()}
+        if path=="/api/usage/summary" and method=="GET":
+            value=self._summary(rows,range_key); value["previous"]=self._previous(range_key,tier,host)
+            return 200,value
         if path=="/api/usage/timeseries" and method=="GET": return 200,{"buckets":self._timeseries(rows,range_key)}
         if path=="/api/usage/models" and method=="GET": return 200,{"models":self._models(rows)}
         if path=="/api/usage/clients" and method=="GET": return 200,{"clients":self._clients(rows)}
@@ -510,9 +527,12 @@ class UsageModule:
         if path in {"/api/usage/settings","/api/usage/settings/"} and method=="GET":
             value=relay.status(); value["capture"]=self.service.capture_state(); return 200,value
         if path=="/api/usage/settings" and method=="POST":
+            if "enabled" in body:
+                if type(body["enabled"]) is not bool: raise UsageError("enabled must be a boolean")
+                relay.store.set_setting("enabled", "1" if body["enabled"] else "0")
             if "retention_days" in body:
                 days=body["retention_days"]
-                if not isinstance(days,int) or not 1<=days<=3650: raise UsageError("retention_days must be 1-3650")
+                if type(days) is not int or not 1<=days<=3650: raise UsageError("retention_days must be 1-3650")
                 relay.store.set_setting("retention_days",str(days)); relay.store.prune()
             value=relay.status(); value["capture"]=self.service.capture_state(); return 200,value
         if path=="/api/usage/clients/rename" and method=="POST": relay.store.rename_client(str(body.get("client_id") or ""),str(body.get("name") or "")); return 200,{"renamed":True}
@@ -535,11 +555,17 @@ class OptimizeModule:
         return {"total_bytes":total,"used_bytes":used,"app_bytes":used,"wired_bytes":0,"compressed_bytes":0,"cached_bytes":0,"free_bytes":free,"swap_used_bytes":0,"swap_total_bytes":0,"pressure":"critical" if raw.get("percent",0)>=90 else "warning" if raw.get("percent",0)>=75 else "normal"}
     def _busy(self):
         usage=self.service.usage
-        active={r.get("profile") for r in usage.inflight_rows()} if usage else set()
+        active=set()
+        if usage:
+            for row in usage.inflight_rows():
+                active.update(str(row[k]) for k in ("profile","model","model_requested") if row.get(k))
         recent=[]
         if usage:
             recent=usage.store.recent(100,"1h")
-        last={r.get("profile"):float(r.get("started_at") or 0) for r in recent}
+        last={}
+        for row in recent:
+            for key in ("profile","model","model_requested"):
+                if row.get(key): last[str(row[key])]=max(last.get(str(row[key]),0),float(row.get("started_at") or 0))
         return active,last
     def _plan(self):
         items=[]; ollama=self.service.ollama_status(); active,last=self._busy(); now=time.time(); idle=900; inuse=30
@@ -554,17 +580,25 @@ class OptimizeModule:
                 name=row.get("profile") or row.get("name"); busy=name in active or now-float(last.get(name,0))<inuse
                 size=int(float(row.get("rss_mb") or 0)*1024*1024)
                 items.append({"id":f"profile:{name}","kind":"model_server","title":f"Stop {name}","detail":"Model server" if not busy else "In-flight or recently used","bytes":size,"in_use":busy,"needs_password":False,"presets":[] if busy else ["recommended","maximum"],"last_used_at":last.get(name)})
-        return {"memory":self._memory(),"items":items,"apps":[],"presets":{"recommended":[x["id"] for x in items if "recommended" in x["presets"]],"maximum":[x["id"] for x in items if "maximum" in x["presets"]]},"estimates":{"recommended":sum(x["bytes"] for x in items if "recommended" in x["presets"]),"maximum":sum(x["bytes"] for x in items if "maximum" in x["presets"])},"thresholds":{"in_use_seconds":inuse,"idle_seconds":idle},"generated_at":now}
+        try:
+            from native_windows import inventory_apps
+            running_pids={r.get("pid") for r in self.service.status_payload().get("statuses",[]) if r.get("running")}
+            apps=[dict(row,processes=len(row.get("hwnd_ids") or [row.get("hwnd")]),quittable=row.get("pid") not in running_pids,reason="model server" if row.get("pid") in running_pids else None) for row in inventory_apps()]
+        except (ImportError,OSError): apps=[]
+        return {"memory":self._memory(),"items":items,"apps":apps,"presets":{"recommended":[x["id"] for x in items if "recommended" in x["presets"]],"maximum":[x["id"] for x in items if "maximum" in x["presets"]]},"estimates":{"recommended":sum(x["bytes"] for x in items if "recommended" in x["presets"]),"maximum":sum(x["bytes"] for x in items if "maximum" in x["presets"])},"thresholds":{"in_use_seconds":inuse,"idle_seconds":idle},"generated_at":now}
     def route(self,method,path,query,body):
         if path=="/api/optimize/plan" and method=="GET": return 200,self._plan()
         if path=="/api/optimize/run" and method=="POST":
             ids=body.get("items",[])
             if not isinstance(ids,list): raise UsageError("items must be an array")
+            before=self._memory()
             plan={x["id"]:x for x in self._plan()["items"]}; results=[]
             for ident in ids:
                 if not isinstance(ident,str) or ident not in plan: results.append({"id":ident,"ok":False,"message":"unknown optimization item"}); continue
                 item=plan[ident]
-                if item["in_use"]: results.append({"id":ident,"ok":True,"skipped":True,"message":"request in flight or recently used"}); continue
+                active,last=self._busy(); key=ident.split(":",1)[1]
+                busy=item["in_use"] or key in active or time.time()-last.get(key,0)<30
+                if busy: results.append({"id":ident,"ok":True,"skipped":True,"message":"request in flight or recently used"}); continue
                 try:
                     if ident.startswith("ollama:"):
                         if not self.service.ollama_status().get("reachable"): raise UnsupportedError("Ollama unavailable")
@@ -573,7 +607,8 @@ class OptimizeModule:
                     else:
                         self.service.stop(ident[8:]); results.append({"id":ident,"ok":True,"message":"server stopped"})
                 except AgentError as e: results.append({"id":ident,"ok":False,"message":str(e)})
-            after=self._memory(); return 200,{"results":results,"before":self._memory(),"after":after,"freed_bytes":0}
+            after=self._memory(); freed=max(0, int(before.get("used_bytes",0))-int(after.get("used_bytes",0)))
+            return 200,{"results":results,"before":before,"after":after,"freed_bytes":freed}
         if path=="/api/optimize/purge" and method=="POST": return 409,{"error":"unsupported_capability","message":"Windows file-cache purge is unavailable"}
         return None
 
@@ -632,6 +667,7 @@ class LocalService(AgentService):
         self.capture_ports: dict[str, int] = {}
         self.capture_relays: dict[str, Any] = {}
         self._shutdown_requested = threading.Event()
+        self._profile_mutation_lock = threading.RLock()
 
     def bootstrap(self) -> None:
         self.configuration.profiles_directory.mkdir(parents=True, exist_ok=True)
@@ -642,6 +678,28 @@ class LocalService(AgentService):
         else:
             self.usage = UsageRelay(self, self.configuration.host, requested_relay_port)
             self.usage.start()
+        # The shared store's periodic pruner is not sufficient for short-lived
+        # captures.  Prune after each write so retention settings affect the
+        # records the Dashboard actually sees immediately.
+        if self.usage is not None:
+            store = self.usage.store
+            with store._lock:
+                columns = {row[1] for row in store._db.execute("PRAGMA table_info(requests)")}
+                if "host" not in columns:
+                    store._db.execute("ALTER TABLE requests ADD COLUMN host TEXT NOT NULL DEFAULT 'local'")
+            if not getattr(store, "_modelmatrix_retention_wrapped", False):
+                original_record = store.record
+                def record_with_retention(row: dict[str, Any], _record=original_record, _store=store) -> None:
+                    if _store.setting("enabled") != "0":
+                        _record(row)
+                        _store.prune()
+                store.record = record_with_retention  # type: ignore[method-assign]
+                store._modelmatrix_retention_wrapped = True  # type: ignore[attr-defined]
+            original_status = self.usage.status
+            def status_with_settings(_status=original_status, _store=store):
+                value = _status(); value["enabled"] = _store.setting("enabled") != "0"
+                return value
+            self.usage.status = status_with_settings
         self.hf = getattr(self, "hf", None)
         self.start_watchdog()
 
@@ -691,7 +749,8 @@ class LocalService(AgentService):
             raise InvalidProfileError("capture requires START_COMMAND_JSON/SERVER_ARGS_JSON or an adapter launch; custom shell commands cannot be safely rewritten")
 
     def _free_port(self) -> int:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        family = socket.AF_INET6 if ":" in self.configuration.host.strip("[]") else socket.AF_INET
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
             sock.bind((self.configuration.host.strip("[]"), 0))
             return int(sock.getsockname()[1])
 
@@ -726,7 +785,12 @@ class LocalService(AgentService):
             # port as foreign. It is safe to stop because it is controller-owned.
             self._stop_capture(profile.name)
             self.capture_ports.setdefault(profile.name, self._free_port())
-        super().start(name)
+        try:
+            super().start(name)
+        except Exception:
+            if enabled:
+                self.capture_ports.pop(profile.name, None)
+            raise
         if enabled and self.usage is not None and profile.name not in self.capture_relays:
             target = self._captured_profile(profile)
             models = [str(x) for x in (target.request_model, target.server_model_id, target.name) if x]
@@ -769,6 +833,7 @@ class LocalService(AgentService):
         if enabled and not self._capture_supported(profile.values):
             raise UnsupportedError(f"{name}: capture requires a launched non-external profile with PORT")
         if enabled: self._validate_capture_command(profile.values)
+        was_running = _profile_running(self, name)
         values = dict(_profile_values(self, name))
         if enabled: values["CAPTURE_MODE"] = "1"
         else: values.pop("CAPTURE_MODE", None)
@@ -777,8 +842,10 @@ class LocalService(AgentService):
         if not enabled:
             self._stop_capture(name)
             self.capture_ports.pop(name, None)
-        elif _profile_running(self, name):
-            # Apply immediately while preserving the AgentService supervision path.
+        if was_running:
+            # Apply immediately while preserving the AgentService supervision
+            # path. Disabling capture must restart too: the process was
+            # launched on the private port and must return to its public port.
             self.restart(name)
         return {"profile": name, "capture": enabled, "capture_state": self.capture_state()}
 
@@ -803,6 +870,11 @@ class LocalService(AgentService):
 
     def save_profile_document(self, name: str, values: dict[str, str], raw_json: str | None,
                               *, source: Path | None, create_only: bool, format_name: str) -> None:
+        with self._profile_mutation_lock:
+            self._save_profile_document(name, values, raw_json, source=source, create_only=create_only, format_name=format_name)
+
+    def _save_profile_document(self, name: str, values: dict[str, str], raw_json: str | None,
+                               *, source: Path | None, create_only: bool, format_name: str) -> None:
         _profile_name(name)
         if create_only: _check_profile_collision(self, name)
         suffix = ".json" if format_name.lower() in {".json", "json"} else ".env"
@@ -816,9 +888,10 @@ class LocalService(AgentService):
         self.profiles = ProfileRepository(self.configuration.profiles_directory)
 
     def delete_profile(self, name: str) -> None:
-        path = _profile_source_file(self.configuration.profiles_directory, _profile_name(name))
-        path.unlink()
-        self.profiles = ProfileRepository(self.configuration.profiles_directory)
+        with self._profile_mutation_lock:
+            path = _profile_source_file(self.configuration.profiles_directory, _profile_name(name))
+            path.unlink()
+            self.profiles = ProfileRepository(self.configuration.profiles_directory)
 
     def ollama_status(self) -> dict[str, Any]:
         tags = _ollama_json("/api/tags")
@@ -848,10 +921,10 @@ class LocalService(AgentService):
                 "profiles_dir": str(self.configuration.profiles_directory),
                 "controller_root": str(self.configuration.root),
                 "relay": relay,
-                "platform": {"os": "windows", "display_name": "Windows", "local_host_label": socket.gethostname(), "credential_store": "Windows Credential Manager"},
+                "platform": {"os": "windows", "display_name": "Windows", "local_host_label": socket.gethostname(), "credential_store": "Windows DPAPI"},
                 "capabilities": {
-                    "open_folders": False, "quit_apps": False, "purge_file_cache": False,
-                    "keep_awake": False, "remote_gateways": self.bridge_local.impl is not None,
+                    "open_folders": os.name == "nt", "quit_apps": os.name == "nt", "purge_file_cache": False,
+                    "keep_awake": os.name == "nt", "optimize": True, "remote_gateways": self.bridge_local.impl is not None,
                     "capture": any(x.get("supported") for x in self.capture_state()), "connect_apps": self.bridge_local.impl is not None,
                     "huggingface": self.hf_local.impl is not None,
                 },
@@ -884,11 +957,22 @@ class DashboardHandler(AgentRequestHandler):
         host = raw.strip().lower()
         configured = self.server.server_address[0].strip("[]").lower()
         if ":" in host and host.startswith("["):
-            hostname = host[1:host.find("]")]
+            close = host.find("]")
+            if close <= 1 or (host[close + 1:] and not host[close + 1:].startswith(":")):
+                return False
+            hostname = host[1:close]
+            port = host[close + 2:] if host[close + 1:].startswith(":") else ""
         elif host.count(":") == 1:
-            hostname = host.rsplit(":", 1)[0]
+            hostname, port = host.rsplit(":", 1)
+            if not port.isdigit():
+                return False
         else:
+            if ":" in host:
+                return False
             hostname = host
+            port = ""
+        if port and int(port) != int(self.server.server_port):
+            return False
         allowed = {configured, "localhost", "127.0.0.1", "::1"}
         if configured in {"0.0.0.0", "::"}:
             allowed |= {"localhost", "127.0.0.1", "::1"}
@@ -962,7 +1046,7 @@ class DashboardHandler(AgentRequestHandler):
         if not candidate.is_file(): return False
         content = candidate.read_bytes()
         content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
-        self.send_response(200); self.send_header("Content-Type", content_type); self.send_header("Content-Length", str(len(content))); self.send_header("Cache-Control", "no-cache" if candidate.name == "index.html" else "public, max-age=3600"); self.send_header("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"); self.end_headers(); self.wfile.write(content); return True
+        self.send_response(200); self.send_header("Content-Type", content_type); self.send_header("Content-Length", str(len(content))); self.send_header("Cache-Control", "no-cache" if candidate.name == "index.html" else "public, max-age=3600"); self.send_header("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"); self.end_headers(); self.wfile.write(content); return True
 
     def _handle_local(self, method: str) -> None:
         self._new_cookie = None
@@ -1046,23 +1130,57 @@ class DashboardHandler(AgentRequestHandler):
 
 
 class LocalHTTPServer(ThreadingHTTPServer):
-    daemon_threads = True
+    daemon_threads = False
     allow_reuse_address = True
     def __init__(self, address: tuple[str, int], service: LocalService, token: str | None, dashboard_dir: Path):
+        self.address_family = socket.AF_INET6 if ":" in address[0].strip("[]") else socket.AF_INET
         super().__init__(address, DashboardHandler)
         self.service = service; self.auth_token = token; self.dashboard_dir = dashboard_dir
         service.configuration.port = self.server_port
         self.session_manager = SessionManager(token)
         self._shutdown_started = False
+        self._connections: set[socket.socket] = set()
+        self._connections_lock = threading.Lock()
+        self._close_lock = threading.RLock()
         service.shutdown = lambda: threading.Thread(target=self.graceful_shutdown, name="bridge-shutdown", daemon=True).start()
+
+    def process_request(self, request: socket.socket, client_address: Any) -> None:
+        with self._connections_lock:
+            if self._shutdown_started:
+                self.shutdown_request(request)
+                return
+            self._connections.add(request)
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request: socket.socket, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            with self._connections_lock:
+                self._connections.discard(request)
+
+    def handle_error(self, request: socket.socket, client_address: Any) -> None:
+        if self._shutdown_started and isinstance(sys.exc_info()[1], OSError):
+            return  # cancelling an in-flight socket is normal during shutdown
+        super().handle_error(request, client_address)
+
+    def server_close(self) -> None:
+        with self._close_lock:
+            self._shutdown_started = True
+            with self._connections_lock:
+                connections = list(self._connections)
+            for connection in connections:
+                try: connection.shutdown(socket.SHUT_RDWR)
+                except OSError: pass
+            super().server_close()  # non-daemon handlers finish before SQLite closes
 
     def graceful_shutdown(self) -> None:
         if self._shutdown_started: return
         self._shutdown_started = True
-        try: self.service.stop_all_managed()
-        finally:
+        with self._close_lock:
             self.shutdown()
             self.server_close()
+            self.service.stop_all_managed()
 
 
 def dashboard_dir(root: Path) -> Path:
@@ -1130,18 +1248,26 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     token = _read_token(str(args.auth_token_file) if args.auth_token_file else None)
     service = make_service(args.root, args.profiles_dir, args.host, args.port, token, unsafe_bind=args.unsafe_bind, relay_port=args.relay_port)
-    server = LocalHTTPServer((args.host, args.port), service, token, dashboard_dir(args.root))
-    record = _controller_record(args.root, server.server_port)
-    print(f"controller=http://{args.host}:{server.server_port}", flush=True)
+    server: LocalHTTPServer | None = None
+    record: Path | None = None
+    serving = False
     try:
+        server = LocalHTTPServer((args.host, args.port), service, token, dashboard_dir(args.root))
+        record = _controller_record(args.root, server.server_port)
+        print(f"controller=http://{args.host}:{server.server_port}", flush=True)
         if not args.no_browser:
             import webbrowser
             webbrowser.open(f"http://127.0.0.1:{server.server_port}/")
+        serving = True
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        server.shutdown(); server.server_close(); service.stop_all_managed()
+        if server is not None:
+            if serving:
+                server.shutdown()
+            server.server_close()
+        service.stop_all_managed()
         if record is not None:
             try:
                 if json.loads(record.read_text(encoding="utf-8-sig")).get("pid") == os.getpid():

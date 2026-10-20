@@ -7,6 +7,7 @@ so `python3 modelmatrix_agent.py` resolves it as a sibling module.
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import re
 import signal
@@ -28,6 +29,7 @@ from platform_support import (
     process_command as platform_process_command,
     process_is_alive as platform_process_is_alive,
     process_rss_mb as platform_process_rss_mb,
+    safe_windows_component,
     terminate_process_tree as platform_terminate_process_tree,
 )
 
@@ -604,7 +606,7 @@ class Profile:
     @property
     def log_path(self) -> str:
         raw = self.values.get("LOG_ALIAS") or self.values.get("MODEL_ALIAS") or self.name
-        safe = "".join(c if c.isalnum() or c in "_.-" else "_" for c in raw)
+        safe = safe_windows_component(raw)
         if IS_WINDOWS:
             return str(local_appdata() / "ModelMatrix" / "logs" / f"{safe}.log")
         return f"/tmp/{safe}.log"
@@ -632,7 +634,9 @@ def _has_weight_suffix(value: str) -> bool:
 
 
 def _has_local_path_prefix(value: str) -> bool:
-    return value.startswith(("/", "~", "./", "../"))
+    return value.startswith(("/", "~", "./", "../")) or bool(
+        re.match(r"^[A-Za-z]:[\\/]", value) or value.startswith(("\\\\",))
+    )
 
 
 def _looks_like_local_fs_path(raw: str) -> bool:
@@ -671,7 +675,7 @@ def _resolve_relative_model_file(model_dir_raw: str, model_file_raw: str) -> str
 
 
 def _join_relative_model_file(model_dir_raw: str, model_file_raw: str) -> bool:
-    if not model_file_raw or Path(model_file_raw).expanduser().is_absolute():
+    if not model_file_raw or Path(model_file_raw).expanduser().is_absolute() or ntpath.isabs(model_file_raw):
         return False
     return bool(model_dir_raw and _looks_like_local_fs_path(model_dir_raw))
 

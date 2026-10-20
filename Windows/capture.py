@@ -7,6 +7,7 @@ profile listener can never close the shared database twice.
 from __future__ import annotations
 
 import threading
+import socket
 from http.server import ThreadingHTTPServer
 from typing import Any
 
@@ -41,7 +42,13 @@ class _CaptureOwner:
             pass
         Handler.relay = owner
         try:
-            self.server = ThreadingHTTPServer((self.host.strip("[]"), self.port), Handler)
+            # ThreadingHTTPServer defaults to AF_INET even when the controller
+            # is bound to an IPv6 loopback. Select the family explicitly so a
+            # capture toggle has the same bind behavior as the dashboard.
+            class BoundServer(ThreadingHTTPServer):
+                pass
+            BoundServer.address_family = socket.AF_INET6 if ":" in self.host.strip("[]") else socket.AF_INET
+            self.server = BoundServer((self.host.strip("[]"), self.port), Handler)
             self.server.daemon_threads = True
             threading.Thread(target=self.server.serve_forever, name=f"capture-{self.port}", daemon=True).start()
             return True

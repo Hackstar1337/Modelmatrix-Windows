@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -341,6 +342,8 @@ class WindowsProfileManager:
             if not job or job.get("state") != "completed":
                 return
             manager._set(job, profile_state="creating", profile_message="Creating the Windows profile")
+        name = str(job.get("profile") or job.get("id") or "model")
+        profile: dict[str, Any] = {}
         try:
             name, profile = self._write(job)
             job["profile"] = name
@@ -520,16 +523,90 @@ class LocalHF:
                 candidate = Path(value).expanduser()
                 if not candidate.is_absolute():
                     raise HFAgentError("Models folder must be an absolute Windows path.")
+                old = self.paths.models
+                try:
+                    same = candidate.resolve() == old.resolve()
+                except OSError:
+                    same = candidate == old
+                if not same:
+                    active = [job for job in self.downloads.list() if job.get("state") in {"queued", "downloading", "waiting", "verifying", "paused"}]
+                    if active:
+                        raise HFAgentError("Finish or cancel downloads before moving the models folder.", 409, "conflict")
+                    try:
+                        if old.resolve() in candidate.resolve().parents:
+                            raise HFAgentError("The new models folder cannot be inside the current models folder.", 409, "conflict")
+                    except OSError:
+                        pass
+                    if candidate.exists() and any(candidate.iterdir()):
+                        raise HFAgentError("The new models folder must be empty before models are moved there.", 409, "conflict")
+                    try:
+                        candidate.mkdir(parents=True, exist_ok=True)
+                        if old.exists():
+                            for entry in old.iterdir():
+                                shutil.move(str(entry), str(candidate / entry.name))
+                            try:
+                                old.rmdir()
+                            except OSError:
+                                pass
+                    except OSError as error:
+                        raise HFAgentError(f"Could not move the models folder: {error}") from error
+                    self.paths.models = candidate
+                    old_prefix = str(old)
+                    new_prefix = str(candidate)
+                    with self.downloads.lock:
+                        for job in self.downloads.jobs.values():
+                            folder = str(job.get("folder") or "")
+                            if folder == old_prefix or folder.startswith(old_prefix + os.sep):
+                                job["folder"] = new_prefix + folder[len(old_prefix):]
+                        self.downloads.save()
+                    # Profiles are user-editable JSON, so update only the
+                    # generated model-path fields and leave all other values
+                    # untouched.  A malformed profile is ignored safely.
+                    for profile_path in self.profiles.directory.glob("*.json"):
+                        try:
+                            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+                            if not isinstance(profile, dict):
+                                continue
+                            changed = False
+                            model_path = profile.get("MODEL_PATH")
+                            if isinstance(model_path, str) and (model_path == old_prefix or model_path.startswith(old_prefix + os.sep)):
+                                profile["MODEL_PATH"] = new_prefix + model_path[len(old_prefix):]
+                                changed = True
+                            for key in ("START_COMMAND_JSON", "SERVER_ARGS_JSON"):
+                                raw = profile.get(key)
+                                try:
+                                    argv = json.loads(raw) if isinstance(raw, str) else None
+                                except ValueError:
+                                    argv = None
+                                if isinstance(argv, list):
+                                    updated = [new_prefix + value[len(old_prefix):] if isinstance(value, str) and (value == old_prefix or value.startswith(old_prefix + os.sep)) else value for value in argv]
+                                    if updated != argv:
+                                        profile[key] = json.dumps(updated)
+                                        changed = True
+                            if changed:
+                                profile_path.write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8")
+                        except (OSError, ValueError, TypeError):
+                            continue
                 current[key] = str(candidate)
-                self.paths.models = candidate
             elif key == "engine_paths":
                 if not isinstance(value, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in value.items()):
                     raise HFAgentError("Engine paths must be a map of engine names to absolute paths.")
-                current[key] = value
-                self.finder.set_custom_paths(value)
+                merged = dict(current.get("engine_paths") or {})
+                for engine, configured in value.items():
+                    if configured:
+                        path = Path(configured).expanduser()
+                        if not path.is_absolute():
+                            raise HFAgentError("Engine paths must be absolute paths.")
+                        merged[engine] = str(path)
+                    else:
+                        merged.pop(engine, None)
+                current[key] = merged
+                self.finder.set_custom_paths(merged)
             elif key in ("speed_limit_mbps", "connections_per_file"):
-                if not isinstance(value, (int, float)) or value < 0:
+                if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)) or value < 0:
                     raise HFAgentError(f"Invalid {key}.")
+                if key == "connections_per_file" and (int(value) != value or not 1 <= int(value) <= 8):
+                    raise HFAgentError("connections_per_file must be between 1 and 8.")
                 current[key] = value
             else:
                 current[key] = bool(value)
@@ -723,7 +800,7 @@ class LocalHF:
         report = self._repo_report(repo, revision, context)
         if not report["download_available"]:
             raise HFAgentError(report["verdict"]["detail"], 409, report["verdict"]["code"])
-        selected = report["variants"][0]
+        selected = next((variant for variant in report["variants"] if variant.get("recommended")), report["variants"][0])
         wanted = body.get("version") or input_variant
         for variant in report["variants"]:
             if isinstance(wanted, str) and wanted.lower() in variant["label"].lower():
@@ -766,7 +843,14 @@ class LocalHF:
                 try:
                     resolved = str(folder.resolve())
                     if folder.is_dir() and resolved not in tracked_folders:
-                        untracked.append({"folder": str(folder), "bytes_on_disk": sum(item.stat().st_size for item in folder.rglob("*") if item.is_file())})
+                        total = 0
+                        for item in folder.rglob("*"):
+                            try:
+                                if item.is_file():
+                                    total += item.stat().st_size
+                            except OSError:
+                                continue
+                        untracked.append({"folder": str(folder), "bytes_on_disk": total})
                 except OSError:
                     continue
         return {"models": models, "untracked": untracked}
@@ -808,7 +892,7 @@ class LocalHF:
                 tag = data.get("tag_name") if isinstance(data, dict) else nightly_tag
                 assets = data.get("assets", []) if isinstance(data, dict) else []
                 candidates = [asset for asset in assets if cpu_asset(asset)]
-            chosen = next((asset for asset in candidates if re.search(rf"(?:^|[-_])(?:win|windows)-{arch}\.zip$", str(asset.get("name", "")), re.I)), None)
+            chosen = next((asset for asset in candidates if re.search(rf"(?:^|[-_])(?:win|windows)-cpu-{arch}\.zip$", str(asset.get("name", "")), re.I)), None)
             chosen = chosen or (sorted(candidates, key=lambda item: str(item.get("name", "")))[0] if candidates else None)
             if not chosen or not isinstance(chosen.get("digest"), str) or not chosen["digest"].lower().startswith("sha256:"):
                 raise HFAgentError("GitHub did not publish a SHA-256 digest for a Windows llama.cpp asset.", 503, "artifact_unverified")
@@ -817,6 +901,8 @@ class LocalHF:
                 raise HFAgentError("GitHub returned an invalid SHA-256 digest.", 503, "artifact_unverified")
             version = str(tag or "latest")
             downloads = [{"name": chosen["name"], "url": chosen.get("browser_download_url"), "size": int(chosen.get("size") or 0), "sha256": digest}]
+            if downloads[0]["size"] <= 0:
+                raise HFAgentError("GitHub returned an invalid Windows asset size.", 503, "artifact_unverified")
             if not isinstance(downloads[0]["url"], str) or not downloads[0]["url"].startswith("https://github.com/ggml-org/llama.cpp/releases/download/"):
                 raise HFAgentError("GitHub returned an invalid official asset URL.", 503, "artifact_unverified")
         elif engine == "ollama":

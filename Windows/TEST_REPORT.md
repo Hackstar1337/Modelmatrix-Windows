@@ -1,66 +1,66 @@
-# ModelMatrix Windows test report
+# ModelMatrix Windows verification report
 
-**Date:** 20 October 2026. **Baseline:** `214863ac289c0197a593bd9d61a1d915e134c356`. **Branch:** `windows-support`.
+**Date:** 20 October 2026. **Original baseline:** `214863ac289c0197a593bd9d61a1d915e134c356`. This report covers the expanded implementation, not only the first porting pass.
 
-## Test environments
+## Environments
 
-Native validation used an authorized Windows 11 x64 workspace, reported OS build 26300, Windows PowerShell 5.1, portable CPython 3.12.15, Node.js 24.19.0, and project-pinned pnpm 11.25.0 via Corepack. Python/source/runtime artifacts and installation/data/store directories were isolated in the task workspace. No global Python installation, startup task, firewall rule, registry setting or persistent execution-policy change was required.
+Native execution used **Windows 11 x64, build 26300**, Windows PowerShell **5.1**, portable CPython **3.12.15**, Node **24.19.0** and pinned pnpm **11.25.0** through Corepack. Code, install, venv, packages, models and data used task-owned folders, including paths with spaces. No global Python install, firewall/registry change, persistent execution-policy change or startup task was necessary. CMD wrappers use process-only script-policy handling; enforced corporate policy must still be respected.
 
-Linux regression/build validation used the original cloned repository in the Ubuntu sandbox with Python 3.12 and the pinned pnpm toolchain. No Windows 10 or Mac device was available for native testing.
+Linux preservation checks use the original Ubuntu clone. No native Windows 10, ARM64 or macOS device was available. Windows 10 is an implementation target, **not a tested-device claim**.
 
-## Results
+## Completed native results
 
-| Test | Result | What it demonstrates |
+| Check | Result | Verified scope |
 |---|---|---|
-| Native Windows feature suite | **37 discovered; 35 passed, 2 intentional Unix-only skips** | Controller/session/Host checks, profile handling, bridge security/config rollback, HF contracts, secrets, distribution assertions, real capture and scoped HTTP client access. Some engine/client cases use mocks; not universal end-to-end verification. |
-| Native Windows process/platform suite | **12 passed** | Real Job Object child/descendant termination and Unicode/space/quote argv round-trip, plus command/PATH/PID-reuse/listener/config regression checks. |
-| Native CLI suite | **4 passed** | HTTP status/error handling, dry-run isolation and mutation session/origin contract. |
-| Dashboard tests | **2 passed** on Windows and Linux | Platform/capability metadata and preserved legacy Mac defaults. |
-| Native Dashboard dependency install/build | **Passed** | Frozen installation, esbuild native build dependency, TypeScript check and Vite production build with Corepack-only package-manager invocation. |
-| PowerShell 5.1 parser | **Passed** | All Windows scripts and Windows RemoteAgent installer parse on the actual Windows host. |
-| Actual Windows build script | **Passed** | Build script ran the pinned install/build and Python compilation. |
-| Actual per-user installer | **Passed** | Isolated venv creation, correct Dashboard/dist staging, spaced paths and default source-root resolution; shortcuts/startup disabled for this test. |
-| Installed startup/verification/shutdown | **Passed** | Actual HTTP controller startup/health, ownership validation and graceful shutdown: `stopped: true`, `forced: false`. |
-| Direct controller launch/stop | **Passed** | Native ownership record written by the Python controller and consumed by stop script; actual graceful stop, no forced kill. |
-| Actual Windows packaging script | **Passed** | Created ZIP plus SHA-256 output with the expected source/static layout. |
-| Original/shared RemoteAgent suite on Linux | **157 discovered; 156 passed, 1 native-Win32 skip** | Existing Python agent behavior preserved, including new portable/Windows contracts. |
-| Final Windows-oriented suite on Linux | **39 passed** | Includes two final profile-loadability/BOM reader regressions added after the native pass; these portable parsing changes are tested on Linux, not falsely counted as native tests. |
-| Python compilation / Git whitespace check | **Passed** | Source compiles and the change set is whitespace-clean. |
+| Full RemoteAgent suite | **172 tests; 11 intentional POSIX-only skips; zero failures/errors** | Portable configuration races/locking, parsing, identity, launch/stop, native Job Object descendants, discovery, HF factories and shared contracts. |
+| Full Windows feature suite | **78 tests; 2 intentional Unix-only skips; zero failures/errors** | Actual HTTP/session/origin/Host routes, profile CRUD, SQL usage/search/export/retention, capture toggles/restart, scoped clients/proxies, native process/window fixtures, HF pipelines, credentials, distribution and final race fixes. |
+| CLI contracts | **4 passed** | HTTP success/error, dry-run isolation, mutation session/origin behavior and nonzero failures. |
+| Dashboard | **Passed** | Frozen native install, TypeScript typecheck, frontend tests and Vite production build under Corepack. |
+| PowerShell parser | **8 scripts passed** | Seven distribution scripts and Windows RemoteAgent installer parsed on PowerShell 5.1. |
+| Authenticated installed lifecycle | **Passed** | Fresh isolated venv, spaced paths, BOM auth file, independent controller/relay ports, readiness/health, duplicate refusal, graceful stop, restart, repeated verify/stop and data-preserving uninstall. |
+| Startup safety | **Passed** | Occupied-port refusal leaves unrelated fixture alive; invalid/stale identity handling; background launch returns under captured caller output without retaining caller pipes. |
+| Concurrent shutdown | **Passed** | Eight real HTTP usage pollers finish before SQLite teardown; no handler exceptions. Regression maintained in the suite. |
+| Native tray | **Passed** | Actual window/icon initialization, duplicate-instance refusal and owned tray Quit/window/mutex cleanup. |
+| Windows package script | **Passed locally** | Source/static ZIP and SHA-256 output. Release-owner signing is not claimed. |
+| Source integrity | **Passed** | Compilation and focused diff/whitespace checks. |
 
-The two native feature skips are specifically Unix mode-bit checks and a non-Windows production-store expectation. They are not skipped Windows feature implementations. The Linux native-process skip requires actual Win32 Job Objects.
+The RemoteAgent skips are intrinsically POSIX executable/Bash/GLIBC/shebang or Unix-system fixtures, not Windows implementations silently omitted. Windows engine/profile/process/installer counterparts are covered. The two feature skips concern Unix mode bits and a non-Windows production secret-store condition; real DPAPI encryption/decryption was tested on Windows.
 
-## Genuine Windows inference, not a mock server
+Early worker `WinError 10013` failures came from missing loopback permission on those execution commands. The complete parent run explicitly enabled loopback access and passed the same tests; these are not unresolved application networking failures.
 
-Official `llama-b11748-bin-win-cpu-x64.zip` was downloaded and SHA-256 verified:
+## Real inference, not a mock
 
-`59083a1df768be176d851ddbab6bbde2d8a67a1ea7f1d42f770753d13dc74f60`
+Official **llama.cpp b11748 CPU x64** and a tiny GGUF were pinned and SHA-256 verified:
 
-Model `stories260K.gguf`, pinned Hugging Face revision `96f460f9c1e2ca43d0adc1c682b832525a2c0ea3`, was SHA-256 verified:
+- `llama-b11748-bin-win-cpu-x64.zip`: `59083a1df768be176d851ddbab6bbde2d8a67a1ea7f1d42f770753d13dc74f60`
+- `stories260K.gguf`, HF revision `96f460f9c1e2ca43d0adc1c682b832525a2c0ea3`: `270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d`
 
-`270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d`
+The executable reported **0.7.0-dev / build 11748 / commit 3bb63cbcb**, Clang 20.1.8, Windows x86_64. Adjacent DLLs were retained. The controller launched its owned process, loaded the GGUF and generated **8 completion tokens from 54 prompt tokens** through public Capture. Real SQLite summaries/timeseries were nonempty.
 
-The actual executable reported **0.7.0-dev, build 11748, commit 3bb63cbcb**, Clang 20.1.8, Windows x86_64. The controller launched it from a directory containing spaces, loaded its adjacent DLLs and the real GGUF, and observed an owned ready PID. A `/v1/chat/completions` request through the public Capture listener generated **8 completion tokens from 54 prompt tokens**. The response, SQLite summary and nonempty usage timeseries were checked.
+A production DPAPI-backed scoped connection then served `/api/connect/<id>/v1/models` and `/chat/completions`. Connection verification called the protected model API and recorded `api_tested: true`, without claiming a real Kilo/OpenCode application was verified. The owned model and capture listener stopped. This tiny model proves functionality, not useful output quality or large-model performance.
 
-A manual connection was then created with a production DPAPI-backed scoped key. Its generated `/api/connect/<id>/v1/models` and `/chat/completions` endpoints worked; connection verification called the actual protected model API and recorded `api_tested: true` without claiming `client_verified: true`. Model process and public capture listener were stopped afterward. This tiny model validates functionality, not useful output quality or production-scale performance.
+## Real browser coverage
 
-A separate real Python HTTP fixture acceptance test verifies exactly one initial captured usage row, correct public/internal port/PID, listener cleanup, protected scoped endpoints even when a different global Dashboard token is configured, and rejection of an incorrect scoped key.
+An isolated native controller and QA data were used in the Desktop in-app browser. Overview, Models & Servers, Clients, Model Insights, Requests & Latency, Settings and Advanced mode rendered. A QA external profile was created through the actual modal and refreshed in the catalog. Twelve deterministic requests were inserted only in the QA database, and the populated request table rendered. Optimize opened/closed without destructive actions on user apps/models. **Final browser console: zero errors.**
 
-## Native failures found and fixed
+The initial run revealed blocked bundled data-URL fonts. The font CSP was fixed without loosening script/request origins. Existing user Ollama services were observed only, never stopped/unloaded. Native close/optimization behavior used controlled fixture windows/processes, not arbitrary user applications.
 
-Validation exposed concrete problems which were repaired and retested: Win32 handle/structure declarations in tray/DPAPI code; locked SQLite cleanup; POSIX executable test fixtures; nested bare pnpm under Corepack; structured command precedence; Windows `WNOHANG` assumptions (including capture stop); script-root parameter initialization; a PowerShell function parameter colliding with read-only `$PID`; full `llama-server.exe` paths being replaced by a basename; real scoped client dispatch/model-list authorization; and worker lifecycle/cleanup. The final core native runs passed after those fixes. Failed intermediate runs are not reported as successes.
+## Expanded-run fixes
 
-## Not verified / inherent platform boundaries
+Real testing repaired lost HOST/PORT structured-command context; config-lock initialization under concurrent writers; shared remote HF selecting Linux adapters; JSON backslash path assertions; SQLite fixture cleanup; disabled usage still recording; SQL previous-period/host behavior; capture disable/restart port restoration; mismatched frontend capabilities; native tray switches/CMD quoting; JSONC commas corrupting quoted content; IPv6 client URLs; authenticated readiness/session handling; shortcut uninstall ownership; inherited PowerShell capture pipes; and active HTTP pollers racing a closed database.
 
-- **Windows 10, Windows ARM64, older/newer Python/Node versions and hardened corporate policy combinations:** not tested natively.
-- **CUDA/Vulkan/ROCm/other GPU drivers, large models, multimodal/tool-calling engines and runtime-specific benchmarks:** not exercised. The verified runtime was x64 CPU llama.cpp.
-- **Ollama daemon load/unload, actual Kilo/OpenCode apps, remote SSH/HTTP agent deployment and remote HF flows:** implemented contracts/safeguards and unit fixtures, but no authorized external target/application was used for end-to-end confirmation.
-- **Tray visual interaction, Start Menu/startup persistence, Explorer/clipboard interaction and cooperative closure of a real user application:** native ABI/inventory or contract checks only; user application windows were not closed as a test.
-- **Long/resumable/gated production HF downloads and automatic engine installation:** manager/release/approval/hash fixtures tested; the real inference artifacts were independently downloaded/checksum-verified. Do not conflate that with every manager workflow being exercised.
-- **Windows CI:** workflow included, not run remotely during this task. **Mac Swift build/tests/signing:** source preserved, not rerun on a Mac.
-- **Apple-only MLX/Metal, macOS SwiftUI/menu-bar internals and macOS cache-purge/signing:** remain inherently platform-specific. Windows uses Dashboard/tray and truthful capabilities; no placeholder pretends those Apple components run on Windows.
+Failed intermediate attempts are not counted as passes. Negative security/validation tests intentionally reject invalid requests.
 
-Therefore this report establishes an implemented Windows port with verified core Windows 11 functionality, **not blanket certification of every original feature on every Windows 10/11 configuration**.
+## Fixtures and unverified boundaries
 
-## Reproduce
+HF ZIP/DLL installation, hash/traversal protection, one-use approvals, model download/check variants, cancellation/resume, folder moves and engine settings use deterministic HTTP/archive fixtures. Real inference artifacts were independently official-download verified. This is not production gated-model account verification.
 
-Follow [README.md](README.md). Run the Windows feature, platform and CLI unittest commands there, `build-windows.cmd`, then install/start/verify/stop in isolated directories with `-NoShortcuts`. For real inference, provide the complete official runtime archive and a genuine GGUF, configure uppercase profile keys/structured argv with `{port}`, enable Capture, make a real model request, and verify usage rows and orderly process/listener shutdown.
+**Not fully exercised:** Windows 10/ARM64; GPU driver/backend permutations; large/multimodal models; real SSH/Tailscale target deployment; actual authenticated Kilo/OpenCode sessions; Explorer/clipboard interaction; persistent startup tasks/shortcuts; release signing; macOS Swift build/signing. Their code/contracts and fixture checks are not misrepresented as hardware/account certification.
+
+Apple-only MLX/Metal, macOS cache purge/signing/SwiftUI internals are not Windows runtimes. Windows reuses the Dashboard/shared agent with native adapters and truthful capability reporting, not false-success placeholders.
+
+## Reproduce and CI
+
+Follow [README.md](README.md), run all three Python suites, Dashboard tests/build and Windows install/start/verify/stop/package scripts in owned folders. The public Windows workflow runs full suites, frozen build, authenticated installed lifecycle, packaging and data-preserving uninstall. Check GitHub Actions for the live result; queued is not passed.
+
+**Conclusion:** observed Windows failures were fixed and tested core paths pass. This is not a guarantee of zero possible defects on every Windows 10/11 installation, third-party model, driver or account.

@@ -24,7 +24,10 @@ function Resolve-Python([string]$Requested) {
         return @($candidate)
     }
     $python = Get-Command python -ErrorAction SilentlyContinue
-    if ($python) { return @($python.Source) }
+    if ($python -and $python.Source -notmatch '\\WindowsApps\\python(?:3)?\.exe$') {
+        & $python.Source --version *> $null
+        if ($LASTEXITCODE -eq 0) { return @($python.Source) }
+    }
     $py = Get-Command py -ErrorAction SilentlyContinue
     if ($py) {
         $raw = & $py.Source -3 -c 'import sys; print(sys.executable)' 2>$null | Out-String
@@ -63,5 +66,9 @@ if (-not $SkipDashboard) {
 } elseif (-not (Test-Path -LiteralPath (Join-Path $dashboard 'dist\index.html') -PathType Leaf)) {
     throw 'Dashboard/dist/index.html is required with -SkipDashboard (NoBuild). Run build-windows.ps1 first.'
 }
-Invoke-CommandChecked $python @('-m','compileall','-q',(Join-Path $SourceRoot 'Windows'))
+$previousCompileRoot = $env:MODELMATRIX_COMPILE_ROOT
+$env:MODELMATRIX_COMPILE_ROOT = $SourceRoot
+try { & $python[0] @($python | Select-Object -Skip 1) -c 'import os,pathlib; root=pathlib.Path(os.environ["MODELMATRIX_COMPILE_ROOT"]); [compile(p.read_text(encoding="utf-8"), str(p), "exec") for p in root.rglob("*.py") if "__pycache__" not in p.parts]' }
+finally { if ($null -eq $previousCompileRoot) { Remove-Item Env:MODELMATRIX_COMPILE_ROOT -ErrorAction SilentlyContinue } else { $env:MODELMATRIX_COMPILE_ROOT = $previousCompileRoot } }
+if ($LASTEXITCODE -ne 0) { throw 'Python source compilation failed.' }
 Write-Output (ConvertTo-Json @{ ok = $true; source = $SourceRoot; dashboard = (-not $SkipDashboard); python = $version.Trim() } -Compress)

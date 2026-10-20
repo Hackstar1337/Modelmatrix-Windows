@@ -13,7 +13,10 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "RemoteAgent"))
 sys.path.insert(0, str(ROOT / "Windows"))
 from agent_core import Profile, ProfileNotFoundError, UsageError
-from bridge import LocalBridge
+from bridge import LocalBridge, REQUIRED_TARGET_VERSIONS
+
+
+KILO_QUALIFIED_VERSION = REQUIRED_TARGET_VERSIONS["kilo"]
 
 
 class BridgeTests(unittest.TestCase):
@@ -88,7 +91,7 @@ class BridgeTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"MODELMATRIX_KILO_PATH": str(executable)}, clear=False), mock.patch("bridge.subprocess.run", return_value=__import__("subprocess").CompletedProcess([], 0, "7.8.13\n", "")):
             target = self.bridge._target("kilo")
         self.assertFalse(target["qualified"])
-        self.assertIn("7.8.12", target["reason"])
+        self.assertIn(KILO_QUALIFIED_VERSION, target["reason"])
 
     def test_jsonc_parser_keeps_urls_containing_double_slash(self):
         path = Path(self.temp.name) / "client.jsonc"
@@ -97,12 +100,12 @@ class BridgeTests(unittest.TestCase):
 
     def test_qualified_apply_uses_owned_provider_and_private_key_file(self):
         executable = Path(self.temp.name) / "kilo"
-        executable.write_text("#!/bin/sh\necho 7.8.12\n", encoding="utf-8")
+        executable.write_text(f"#!/bin/sh\necho {KILO_QUALIFIED_VERSION}\n", encoding="utf-8")
         executable.chmod(0o700)
         config = Path(self.temp.name) / "kilo.jsonc"
         config.write_text('{"other": {"url": "https://example.test/a//b"}}\n', encoding="utf-8")
         env = {"MODELMATRIX_KILO_PATH": str(executable), "MODELMATRIX_KILO_CONFIG": str(config)}
-        with mock.patch.dict(os.environ, env, clear=False), mock.patch("bridge.subprocess.run", return_value=__import__("subprocess").CompletedProcess([], 0, "7.8.12\n", "")):
+        with mock.patch.dict(os.environ, env, clear=False), mock.patch("bridge.subprocess.run", return_value=__import__("subprocess").CompletedProcess([], 0, f"{KILO_QUALIFIED_VERSION}\n", "")):
             _, plan_response = self.bridge.route("POST", "/api/connect/plan", body={"profile": "one", "target": "kilo"})
             plan = plan_response["plan"]
             _, applied = self.bridge.route("POST", "/api/connect/apply", body={"plan_id": plan["id"], "approved": True})
@@ -126,12 +129,12 @@ class BridgeTests(unittest.TestCase):
             # Manual connections do not write a client file; exercise the same
             # protected key transaction through a qualified target instead.
         executable = Path(self.temp.name) / "kilo"
-        executable.write_text("#!/bin/sh\necho 7.8.12\n", encoding="utf-8")
+        executable.write_text(f"#!/bin/sh\necho {KILO_QUALIFIED_VERSION}\n", encoding="utf-8")
         executable.chmod(0o700)
         config = Path(self.temp.name) / "kilo.jsonc"
         original = '{"keep": 1}\n'
         config.write_text(original, encoding="utf-8")
-        with mock.patch.dict(os.environ, {"MODELMATRIX_KILO_PATH": str(executable), "MODELMATRIX_KILO_CONFIG": str(config)}, clear=False), mock.patch("bridge.subprocess.run", return_value=__import__("subprocess").CompletedProcess([], 0, "7.8.12\n", "")):
+        with mock.patch.dict(os.environ, {"MODELMATRIX_KILO_PATH": str(executable), "MODELMATRIX_KILO_CONFIG": str(config)}, clear=False), mock.patch("bridge.subprocess.run", return_value=__import__("subprocess").CompletedProcess([], 0, f"{KILO_QUALIFIED_VERSION}\n", "")):
             _, plan_response = self.bridge.route("POST", "/api/connect/plan", body={"profile": "one", "target": "kilo"})
             with mock.patch.object(self.bridge, "_write_client", side_effect=OSError("disk full")):
                 with self.assertRaises(OSError):

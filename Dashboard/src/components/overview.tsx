@@ -259,7 +259,7 @@ function RemoteHostCard({ gateway, advanced }: { gateway: Gateway; advanced: boo
 
 export function Fleet() {
   const { metrics, status, statusError, overview, bridge, ollama, settings } = useApp();
-  const { localHostLabel, bridgeLabel } = usePlatform();
+  const { localHostLabel, bridgeLabel, capabilities } = usePlatform();
   const advanced = settings.mode === "advanced";
   const running = (status?.statuses ?? []).filter((s) => s.running);
   const models = new Set<string>();
@@ -277,7 +277,7 @@ export function Fleet() {
         models={[...models]}
         stats={local}
         advanced={advanced}
-        onOptimize={openOptimize}
+        onOptimize={capabilities.optimize === false ? undefined : openOptimize}
       />
       {(bridge?.gateways ?? [])
         .filter((g) => g.enabled !== false)

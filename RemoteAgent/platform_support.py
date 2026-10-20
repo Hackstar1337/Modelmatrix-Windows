@@ -100,10 +100,31 @@ def default_log_dir(root: Path) -> Path:
 
 
 def safe_log_path(root: Path, name: str) -> Path:
-    safe = "".join(c if c.isalnum() or c in "_.-" else "_" for c in name)
+    safe = safe_windows_component(name)
     directory = default_log_dir(root)
     directory.mkdir(parents=True, exist_ok=True)
     return directory / f"{safe}.log"
+
+
+_WINDOWS_RESERVED_BASENAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+)
+
+
+def safe_windows_component(value: str) -> str:
+    """Return a filename component safe on Windows and harmless elsewhere.
+
+    Windows rejects device names even when an extension is appended and also
+    strips trailing spaces/dots.  Profile names come from user filenames, so a
+    single sanitizer must protect log, pid, and other derived paths.
+    """
+    safe = "".join(c if c.isalnum() or c in "_.-" else "_" for c in str(value))
+    if IS_WINDOWS:
+        safe = safe.rstrip(" .") or "profile"
+        stem = safe.split(".", 1)[0].upper()
+        if stem in _WINDOWS_RESERVED_BASENAMES:
+            safe = f"_{safe}"
+    return safe
 
 
 @dataclass(frozen=True)
@@ -120,7 +141,7 @@ class ProcessIdentity:
             return other.created_ns is not None and self.created_ns == other.created_ns
         if self.fingerprint and other.fingerprint:
             return self.fingerprint == other.fingerprint
-        return bool(self.executable and other.executable and self.executable.lower() == other.executable.lower())
+        return bool(self.executable and other.executable and self.executable.casefold() == other.executable.casefold())
 
 
 def _fingerprint(command: str | None, executable: str | None) -> str | None:
@@ -315,7 +336,7 @@ class WindowsProcessAdapter:
         self._lock = threading.RLock()
 
     def launch(self, argv: list[str], *, cwd: Path, env: dict[str, str], log_handle, shell: str | None = None) -> subprocess.Popen:
-        if not argv or any(not isinstance(x, str) for x in argv):
+        if not argv or not argv[0] or any(not isinstance(x, str) for x in argv):
             raise ValueError("argv must contain a non-empty executable and strings")
         kwargs: dict[str, Any] = dict(stdout=log_handle, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, cwd=str(cwd), env=env)
         if IS_WINDOWS:
@@ -335,7 +356,10 @@ class WindowsProcessAdapter:
                 argv = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command]
                 kwargs["shell"] = False
             else:
-                command = argv[0] if len(argv) == 1 else " ".join(argv)
+                # cmd.exe parses one command string.  list2cmdline applies the
+                # CreateProcess/MSVCRT quoting rules, avoiding path truncation
+                # for approved .cmd/.bat launches with spaces or quotes.
+                command = argv[0] if len(argv) == 1 else subprocess.list2cmdline(argv)
                 argv = ["cmd.exe", "/d", "/s", "/c", command]
                 kwargs["shell"] = False
         process = subprocess.Popen(argv, **kwargs)
@@ -437,22 +461,27 @@ class WindowsProcessAdapter:
             current = process_identity(pid)
             if current is None or not expected.matches(current):
                 return False
+        terminated = False
         if IS_WINDOWS and job and job.handle:
             try:
                 if force:
-                    ctypes.windll.kernel32.TerminateJobObject(job.handle, 1)
+                    terminated = bool(ctypes.windll.kernel32.TerminateJobObject(job.handle, 1))
                 else:
                     # CTRL_BREAK is cooperative when the child owns a console;
                     # TerminateJobObject below is the reliable bounded fallback.
-                    ctypes.windll.kernel32.TerminateJobObject(job.handle, 0)
+                    terminated = bool(ctypes.windll.kernel32.TerminateJobObject(job.handle, 0))
             except (AttributeError, OSError):
-                pass
-        elif IS_WINDOWS:
-            # An untracked PID has no safe ownership proof; callers must first
-            # capture an identity and pass it as expected.
-            if expected is None:
-                return False
-            subprocess.run(["taskkill.exe", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=max(1.0, timeout), check=False)
+                terminated = False
+        if IS_WINDOWS:
+            if not terminated:
+                # An untracked PID has no safe ownership proof; callers must first
+                # capture an identity and pass it as expected.
+                if expected is None:
+                    return False
+                try:
+                    subprocess.run(["taskkill.exe", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=max(1.0, timeout), check=False)
+                except (OSError, subprocess.TimeoutExpired):
+                    return False
         else:
             try:
                 os.killpg(os.getpgid(pid), signal.SIGKILL if force else signal.SIGTERM)
@@ -584,19 +613,45 @@ def parse_command_json(raw: str | None, *, field: str) -> list[str] | None:
     return value
 
 
+def _is_bare_executable(value: str) -> bool:
+    return not ntpath.dirname(value) and not ntpath.splitdrive(value)[0]
+
+
+def _is_windows_batch(value: str) -> bool:
+    return ntpath.splitext(value)[1].lower() in {".cmd", ".bat"}
+
+
+def _structured_command_result(args: list[str]) -> tuple[list[str], str | None]:
+    if IS_WINDOWS and args and _is_windows_batch(args[0]):
+        return args, "cmd"
+    return args, None
+
+
 def command_argv(profile_values: dict[str, str], fallback: str) -> tuple[list[str], str | None]:
     """Build argv without parsing user data through POSIX shell syntax."""
+    def expand(args: list[str]) -> list[str]:
+        result = []
+        for argument in args:
+            for key, default in (("PORT", None), ("HOST", "127.0.0.1")):
+                value = profile_values.get(key, default)
+                for token in ("${" + key + "}", "{" + key + "}", "{" + key.lower() + "}"):
+                    if token in argument:
+                        if value is None:
+                            raise ValueError(f"{key} is required by structured command placeholder")
+                        argument = argument.replace(token, str(value))
+            result.append(argument)
+        return result
     raw_start = profile_values.get("START_COMMAND_JSON")
     raw_args = profile_values.get("SERVER_ARGS_JSON")
     executable = profile_values.get("SERVER_BIN")
     if raw_start is not None:
         args = parse_command_json(raw_start, field="START_COMMAND_JSON") or []
-        return args, None
+        return _structured_command_result(expand(args))
     if raw_args is not None:
         args = parse_command_json(raw_args, field="SERVER_ARGS_JSON") or []
         if not executable:
             raise ValueError("SERVER_ARGS_JSON requires SERVER_BIN")
-        return [executable, *args], None
+        return _structured_command_result(expand([executable, *args]))
     if executable:
         extra = profile_values.get("EXTRA_ARGS_JSON")
         extra_args = parse_command_json(extra, field="EXTRA_ARGS_JSON") if extra is not None else []
@@ -608,7 +663,7 @@ def command_argv(profile_values: dict[str, str], fallback: str) -> tuple[list[st
             generated = shlex.split(fallback, posix=True)
         except ValueError:
             generated = fallback.split()
-        return [executable, *(generated[1:] if generated else []), *(extra_args or [])], None
+        return _structured_command_result([executable, *(generated[1:] if generated else []), *(extra_args or [])])
     shell = (profile_values.get("SHELL") or "").strip().lower() or None
     if shell not in {None, "powershell", "cmd"}:
         raise ValueError("SHELL must be powershell or cmd")
@@ -639,13 +694,13 @@ def config_lock(handle, *, timeout: float = 10.0) -> None:
     if IS_WINDOWS:
         import msvcrt
         handle.seek(0)
-        if handle.read(1) == b"":
-            handle.seek(0); handle.write(b"0"); handle.flush()
-        handle.seek(0)
         deadline = time.monotonic() + timeout
         while True:
             try:
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                if os.fstat(handle.fileno()).st_size == 0:
+                    handle.write(b"0")
+                    handle.flush()
                 return
             except OSError:
                 if time.monotonic() >= deadline:

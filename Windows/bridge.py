@@ -50,11 +50,16 @@ except ImportError:  # package import as ``Windows.bridge``
 
 
 MAX_BODY = 64 * 1024 * 1024
-REMOTE_GET = {"/api/status", "/api/host/metrics", "/api/doctor", "/api/benchmark/status", "/api/integrations", "/api/version", "/api/ollama/status", "/api/usage/overview", "/api/usage/summary", "/api/usage/timeseries", "/api/usage/models", "/api/usage/clients", "/api/usage/requests", "/api/usage/live", "/api/usage/settings", "/api/usage/export.csv", "/api/hf/check", "/api/hf/check/search", "/api/hf/search", "/api/hf/settings", "/api/hf/downloads", "/api/hf/models", "/api/hf/engines", "/api/hf/engines/jobs"}
-REMOTE_POST = {"/api/start", "/api/stop", "/api/restart", "/api/switch", "/api/stop-all", "/api/benchmark/start", "/api/usage/clients/rename", "/api/hf/settings", "/api/hf/token", "/api/hf/downloads", "/api/hf/models/delete", "/api/hf/engines/plan", "/api/hf/engines/run"}
+REMOTE_GET = {"/api/status", "/api/connect/profiles", "/api/ports", "/api/host/metrics", "/api/doctor", "/api/benchmark/status", "/api/integrations", "/api/version", "/api/ollama/status", "/api/usage/overview", "/api/usage/summary", "/api/usage/timeseries", "/api/usage/models", "/api/usage/clients", "/api/usage/requests", "/api/usage/live", "/api/usage/settings", "/api/usage/export.csv", "/api/hf/host", "/api/hf/check", "/api/hf/check/search", "/api/hf/search", "/api/hf/settings", "/api/hf/downloads", "/api/hf/models", "/api/hf/engines", "/api/hf/engines/jobs"}
+REMOTE_POST = {"/api/start", "/api/stop", "/api/restart", "/api/switch", "/api/stop-all", "/api/integrations/run", "/api/config/profiles-dir", "/api/benchmark/start", "/api/usage/settings", "/api/usage/clients/rename", "/api/usage/reset", "/api/hf/settings", "/api/hf/token", "/api/hf/downloads", "/api/hf/downloads/action", "/api/hf/models/delete", "/api/hf/engines/plan", "/api/hf/engines/run", "/api/hf/engines/install", "/api/hf/engines/uninstall", "/api/hf/engines/cancel"}
 REMOTE_QUERY_KEYS = {"name", "repo", "version", "context", "search", "q", "range", "tier", "limit", "offset", "since", "refresh"}
 TARGETS = ("kilo", "opencode")
-REQUIRED_TARGET_VERSIONS = {"kilo": "7.8.12", "opencode": "1.16.2"}
+# These are the versions published by the upstream npm packages at the time
+# this Windows integration was qualified.  Qualification is deliberately
+# exact: an unreviewed newer/older client must not receive an automatic config
+# mutation.  The package metadata also defines the supported Windows wrappers.
+REQUIRED_TARGET_VERSIONS = {"kilo": "7.8.15", "opencode": "2.0.32"}
+TARGET_SCHEMA_URLS = {"kilo": "https://app.kilo.ai/config.json", "opencode": "https://opencode.ai/config.json"}
 
 
 def _now() -> float:
@@ -488,15 +493,29 @@ class LocalBridge:
         time.sleep(0.03)
         if process.poll() is not None:
             self._tunnels.pop(gateway["id"], None)
+            if process.stderr is not None:
+                try: process.stderr.close()
+                except OSError: pass
             raise OperationFailedError("OpenSSH tunnel exited before forwarding was established")
         self._save_gateways()
 
     def _stop_tunnel(self, gid: str) -> None:
         tunnel = self._tunnels.pop(gid, None)
-        if tunnel and tunnel.process.poll() is None:
-            tunnel.process.terminate()
-            try: tunnel.process.wait(timeout=3)
-            except subprocess.TimeoutExpired: tunnel.process.kill()
+        if not tunnel:
+            return
+        try:
+            if tunnel.process.poll() is None:
+                tunnel.process.terminate()
+                try: tunnel.process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    tunnel.process.kill()
+                    tunnel.process.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            if tunnel.process.stderr is not None:
+                try: tunnel.process.stderr.close()
+                except OSError: pass
 
     def _gateway_status(self, gateway: dict[str, Any], *, probe: bool = True) -> str:
         if not gateway.get("enabled", True): return "disabled"
@@ -579,12 +598,19 @@ class LocalBridge:
         if target not in TARGETS: raise UsageError("target must be kilo, opencode, or manual")
         required_version = REQUIRED_TARGET_VERSIONS[target]
         env = "MODELMATRIX_KILO_PATH" if target == "kilo" else "MODELMATRIX_OPENCODE_PATH"
-        candidates = [os.environ.get(env, "")] + ([shutil.which(target)] if shutil.which(target) else [])
-        executable = next((p for p in candidates if p and Path(p).exists()), None)
+        command_names = ("kilo", "kilo.cmd", "kilocode", "kilocode.cmd") if target == "kilo" else ("opencode", "opencode.cmd")
+        candidates = [os.environ.get(env, "")]
+        candidates.extend(path for name in command_names if (path := shutil.which(name)))
+        executable = next((str(p) for p in candidates if p and Path(p).is_file()), None)
         version = None; qualified = False; reason = "not installed"
         if executable:
             try:
-                result = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=5, check=False)
+                argv = [executable, "--version"]
+                # npm's Windows shims are .cmd files.  They are real supported
+                # launchers, but Windows requires cmd.exe to execute them.
+                if os.name == "nt" and Path(executable).suffix.lower() in {".cmd", ".bat"}:
+                    argv = ["cmd.exe", "/d", "/s", "/c", f'"{executable}" --version']
+                result = subprocess.run(argv, capture_output=True, text=True, timeout=5, check=False)
                 match = re.search(r"(?<!\d)(\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?)", result.stdout + result.stderr)
                 if match:
                     version = match.group(1)
@@ -595,9 +621,15 @@ class LocalBridge:
         config_env = "MODELMATRIX_KILO_CONFIG" if target == "kilo" else "MODELMATRIX_OPENCODE_CONFIG"
         config = os.environ.get(config_env)
         if not config:
-            appdata = os.environ.get("APPDATA") or str(Path.home() / "AppData/Roaming")
-            config = str(Path(appdata) / ("Kilo" if target == "kilo" else "opencode") / "config.json")
-        return {"id": target, "name": "Kilo" if target == "kilo" else "OpenCode", "installed": bool(executable), "qualified": qualified, "version": version, "path": executable, "config_path": config, "required_version": required_version, "reason": reason, "reload_note": "reload the client after applying the protected change" if qualified else "manual setup only until a version-qualified build is installed"}
+            home = Path(os.environ.get("USERPROFILE") or Path.home())
+            appdata = Path(os.environ.get("APPDATA") or (home / "AppData" / "Roaming"))
+            if target == "kilo":
+                config_candidates = [home / ".config" / "kilo" / "kilo.jsonc", home / ".config" / "kilo" / "kilo.json", home / ".config" / "kilo" / "opencode.jsonc", home / ".config" / "kilo" / "opencode.json", appdata / "kilo" / "kilo.jsonc", appdata / "kilo" / "kilo.json"]
+            else:
+                config_candidates = [home / ".config" / "opencode" / "opencode.jsonc", home / ".config" / "opencode" / "opencode.json", appdata / "opencode" / "opencode.jsonc", appdata / "opencode" / "opencode.json"]
+            existing = next((path for path in config_candidates if path.is_file()), None)
+            config = str(existing or config_candidates[0])
+        return {"id": target, "name": "Kilo" if target == "kilo" else "OpenCode", "installed": bool(executable), "qualified": qualified, "version": version, "path": executable, "config_path": config, "required_version": required_version, "schema_url": TARGET_SCHEMA_URLS[target], "supported_executables": list(command_names), "reason": reason, "reload_note": "reload the client after applying the protected change" if qualified else "manual setup only until a version-qualified build is installed"}
 
     def _connection_public(self, row: dict[str, Any]) -> dict[str, Any]:
         return {k: v for k, v in row.items() if k not in {"key", "token", "fingerprint", "config_hash"}}
@@ -611,7 +643,8 @@ class LocalBridge:
         return {"profile": name, "display_name": profile.display_name, "model_id": model, "provider": "OpenAI-compatible", "base_url": endpoint, "server_root": endpoint.rsplit("/api/connect/", 1)[0] if "/api/connect/" in endpoint else endpoint, "model_list_url": endpoint + "/models", "chat_url": endpoint + "/chat/completions", "api_key_requirement": "required", "credential_kind": "protected_file", "readiness": "ready" if ready in {"running", "ready"} else ready, "context": row.get("context"), "capabilities": {"chat": True, "tools": "unknown", "images": "unknown", "embeddings": "unknown"}, "connection_id": connection_id, "summary": f"{profile.display_name} via ModelMatrix ({model})", "request_example": json.dumps({"model": model, "messages": [{"role": "user", "content": "Hello"}]}, separators=(",", ":")), "notes": ["The generated key is scoped to this connection and is never included here."]}
 
     def _relay_url(self, name: str, identity: str, connection_id: str | None) -> str:
-        host = getattr(self.service.configuration, "host", "127.0.0.1")
+        host = getattr(self.service.configuration, "host", "127.0.0.1").strip("[]")
+        host = f"[{host}]" if ":" in host else host
         port = getattr(self.service.configuration, "port", 7700)
         if connection_id:
             return f"http://{host}:{port}/api/connect/{urllib.parse.quote(connection_id, safe='')}/v1"
@@ -658,11 +691,31 @@ class LocalBridge:
                 i += 1
         return "".join(output)
 
+    @staticmethod
+    def _strip_jsonc_trailing_commas(text: str) -> str:
+        output = []
+        in_string = escaped = False
+        for index, char in enumerate(text):
+            if in_string:
+                output.append(char)
+                if escaped: escaped = False
+                elif char == "\\": escaped = True
+                elif char == '"': in_string = False
+            elif char == '"':
+                in_string = True
+                output.append(char)
+            elif char == ",":
+                following = text[index + 1:].lstrip()
+                if not following.startswith(("}", "]")): output.append(char)
+            else:
+                output.append(char)
+        return "".join(output)
+
     def _jsonc_load(self, path: Path) -> dict[str, Any]:
         if not path.exists(): return {}
         text = path.read_text(encoding="utf-8-sig")
         text = self._strip_jsonc_comments(text)
-        text = re.sub(r",\s*([}\]])", r"\1", text)
+        text = self._strip_jsonc_trailing_commas(text)
         try: value = json.loads(text)
         except (ValueError, UnicodeError) as error: raise OperationFailedError("client configuration is not valid JSON/JSONC") from error
         if not isinstance(value, dict): raise OperationFailedError("client configuration must be an object")
@@ -723,7 +776,7 @@ class LocalBridge:
         provider_id = next((c.get("provider_id") for c in self._connections.values() if c.get("profile_key") == key and c.get("target") == target), f"mmx-{connection_id}")
         model_key = next((c.get("model_key") for c in self._connections.values() if c.get("profile_key") == key and c.get("target") == target), self._model_key(name, profile.request_model))
         base = self._relay_url(name, identity, connection_id)
-        plan = {"id": plan_id, "expires_at": expires, "profile_key": key, "target": target, "title": f"Connect {target_info['name']} to {profile.display_name}", "config_path": config_path, "target_version": target_info.get("version"), "provider_id": provider_id, "model_key": model_key, "base_url": base, "model_id": profile.request_model, "make_default": _bool(payload.get("make_default")), "credential_storage": "Windows DPAPI protected scoped key file", "changes": [f"add owned provider.{provider_id} with model {model_key}"] if target != "manual" else ["no config file is changed; use the protected endpoint details manually"], "notes": ["No config or credential is written until this exact expiring plan is approved.", "The client receives a private {file:path} key reference; the bearer key is never embedded in JSON."], "recovery": "Disconnect or Undo removes only the owned provider when its fingerprint still matches.", "_connection_id": connection_id, "_profile_identity": identity, "_target_path": target_info.get("path"), "_config_hash": _json_hash(existing_config), "_base": base}
+        plan = {"id": plan_id, "expires_at": expires, "profile_key": key, "target": target, "title": f"Connect {target_info['name']} to {profile.display_name}", "config_path": config_path, "target_version": target_info.get("version"), "required_version": target_info.get("required_version"), "schema_url": target_info.get("schema_url"), "supported_executables": target_info.get("supported_executables", []), "provider_id": provider_id, "model_key": model_key, "base_url": base, "model_id": profile.request_model, "make_default": _bool(payload.get("make_default")), "credential_storage": "Windows DPAPI protected scoped key file", "changes": [f"add owned provider.{provider_id} with model {model_key}"] if target != "manual" else ["no config file is changed; use the protected endpoint details manually"], "notes": ["No config or credential is written until this exact expiring plan is approved.", "The client receives a private {file:path} key reference; the bearer key is never embedded in JSON."], "recovery": "Disconnect or Undo removes only the owned provider when its fingerprint still matches.", "_connection_id": connection_id, "_profile_identity": identity, "_target_path": target_info.get("path"), "_config_hash": _json_hash(existing_config), "_base": base}
         with self._lock: self._plans[plan_id] = plan
         return {k: v for k, v in plan.items() if not k.startswith("_")}
 
@@ -820,6 +873,60 @@ class LocalBridge:
         self._save_connections()
         return {"connection": self._connection_public(conn), "message": "connection disconnected" if not undo else "connection undone"}
 
+    @staticmethod
+    def _copy_stream_headers(handler: Any, response: Any) -> None:
+        """Copy representation headers without forwarding hop-by-hop state."""
+        blocked = {"connection", "content-length", "content-type", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"}
+        for name, value in response.headers.items():
+            if name.lower() not in blocked:
+                handler.send_header(name, value)
+
+    def _proxy_bound_chat(self, handler: Any, conn: dict[str, Any], body: dict[str, Any]) -> None:
+        """Forward one already-authorized bound chat request over a real HTTP stream."""
+        _, profile, row = self._profile(conn["profile_key"])
+        if row.get("identity_token") != conn.get("identity_token") or row.get("readiness") not in {"running", "ready"}:
+            handler._send_json(409, {"error": "model_unavailable", "message": "bound profile is not ready"})
+            return
+        base = str(profile.base_url).rstrip("/")
+        parsed = urllib.parse.urlsplit(base)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+            handler._send_json(400, {"error": "invalid_endpoint", "message": "the profile has an unsupported inference endpoint"})
+            return
+        outgoing = dict(body)
+        upstream_model = profile.values.get("UPSTREAM_MODEL")
+        if upstream_model:
+            outgoing["model"] = upstream_model
+        request = urllib.request.Request(
+            urllib.parse.urlunsplit(parsed._replace(path=parsed.path.rstrip("/") + "/chat/completions", query="", fragment="")),
+            data=json.dumps(outgoing, separators=(",", ":")).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json", "Accept-Encoding": "identity", "User-Agent": "ModelMatrix-Connection"},
+        )
+        try:
+            response = _opener().open(request, timeout=1800)
+        except urllib.error.HTTPError as error:
+            response = error
+        except (OSError, urllib.error.URLError):
+            handler._send_json(502, {"error": "model_unreachable", "message": "could not reach the bound model server"})
+            return
+        handler.close_connection = True
+        try:
+            with response:
+                handler.send_response(response.status)
+                self._copy_stream_headers(handler, response)
+                handler.send_header("Content-Type", response.headers.get("Content-Type", "application/json"))
+                handler.send_header("Cache-Control", "no-store")
+                handler.send_header("Connection", "close")
+                handler.end_headers()
+                while True:
+                    chunk = response.read1(64 * 1024) if hasattr(response, "read1") else response.read(64 * 1024)
+                    if not chunk:
+                        break
+                    handler.wfile.write(chunk)
+                    handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+
     # ---- routes ------------------------------------------------------
     def route(self, method: str, path: str, query: dict[str, Any] | None = None, body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]] | None:
         method = method.upper(); query = query or {}; body = body or {}
@@ -871,6 +978,8 @@ class LocalBridge:
         direct_match = re.fullmatch(r"/api/connect/([^/]+)/v1/(models|chat/completions)", path)
         if direct_match:
             connection_id = urllib.parse.unquote(direct_match.group(1))
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}", connection_id):
+                handler._send_json(404, {"error": "not_found", "message": "connection not found"}); return True
             expected = self.secret_store.get(f"connection-{connection_id}")
             supplied = handler.headers.get("Authorization", "")
             if not expected or supplied != f"Bearer {expected}":
@@ -908,12 +1017,7 @@ class LocalBridge:
                         handler._send_json(409, {"error": "model_unavailable", "message": "bound profile is not ready"}); return True
                 except AgentError:
                     handler._send_json(409, {"error": "profile_changed", "message": "bound profile is no longer available"}); return True
-            current_identity = str(conn.get("identity_token", ""))
-            handler.path = "/api/connect/inference?" + urllib.parse.urlencode({"profile": conn["profile_key"], "identity": current_identity, "endpoint": "/v1/chat/completions"})
-            try:
-                forward_connection(handler, raw_body)
-            except AgentError:
-                raise
+            self._proxy_bound_chat(handler, conn, request)
             return True
         if path == "/api/connect/inference":
             query = urllib.parse.parse_qs(parsed_path.query)
@@ -936,8 +1040,12 @@ class LocalBridge:
         if slash <= 0: handler._send_json(404, {"error": "not_found", "message": "not found"}); return True
         gid, remote_path = rest[:slash], rest[slash:]
         allowed_exact = {("GET", p) for p in REMOTE_GET} | {("POST", p) for p in REMOTE_POST} | {("DELETE", "/api/hf/token")}
-        dynamic_hf = bool(re.fullmatch(r"/api/hf/(?:downloads/[^/]+(?:/(?:pause|resume|cancel|start|delete))?|engines/jobs/[^/]+(?:/cancel)?)", remote_path))
-        if (handler.command, remote_path) not in allowed_exact and not (dynamic_hf and handler.command in {"GET", "POST", "DELETE"}):
+        dynamic_hf_match = re.fullmatch(r"/api/hf/(downloads|engines/jobs)/([A-Za-z0-9][A-Za-z0-9_.-]{0,95})(?:/(pause|resume|cancel|start|delete))?", remote_path)
+        dynamic_hf = False
+        if dynamic_hf_match:
+            collection, _, action = dynamic_hf_match.groups()
+            dynamic_hf = (collection == "downloads" and ((action is None and handler.command in {"GET", "DELETE"}) or (action in {"pause", "resume", "cancel", "start"} and handler.command == "POST"))) or (collection == "engines/jobs" and ((action is None and handler.command == "GET") or (action == "cancel" and handler.command == "POST")))
+        if (handler.command, remote_path) not in allowed_exact and not ((handler.command == "DELETE" and remote_path == "/api/hf/token") or dynamic_hf):
             handler._send_json(404, {"error": "not_found", "message": "remote route not available"}); return True
         query = urllib.parse.parse_qs(parsed_path.query, keep_blank_values=True)
         if any(key.lower() in {"token", "authorization", "password", "secret", "key"} or key not in REMOTE_QUERY_KEYS for key in query):
@@ -949,9 +1057,13 @@ class LocalBridge:
         outgoing_url = urllib.parse.urlunsplit(parsed._replace(path=parsed.path.rstrip("/") + remote_path, query=urllib.parse.urlencode([(key, value) for key, values in query.items() for value in values]), fragment=""))
         headers = {"User-Agent": "ModelMatrix-Windows-Bridge", "Accept-Encoding": "identity"}; token = self.secret_store.get(f"gateway-{gid}")
         if token: headers["Authorization"] = f"Bearer {token}"
-        data = handler._read_body() if handler.command == "POST" else None
+        data = handler._read_body() if handler.command in {"POST", "DELETE"} else None
         if handler.command == "POST" and data is None:
             return True
+        if handler.command == "POST" and not data:
+            data = b"{}"
+        if handler.command in {"POST", "DELETE"}:
+            headers["Content-Type"] = "application/json"
         request = urllib.request.Request(outgoing_url, data=data, method=handler.command, headers=headers)
         try:
             response = _opener().open(request, timeout=120 if handler.command == "POST" else 20)
@@ -959,7 +1071,7 @@ class LocalBridge:
         except (OSError, urllib.error.URLError): handler._send_json(502, {"error": "remote_unreachable", "message": "could not reach remote gateway"}); return True
         handler.close_connection = True
         with response:
-            handler.send_response(response.status); handler.send_header("Content-Type", response.headers.get("Content-Type", "application/json")); handler.send_header("Cache-Control", "no-store"); handler.send_header("Connection", "close"); handler.end_headers()
+            handler.send_response(response.status); self._copy_stream_headers(handler, response); handler.send_header("Content-Type", response.headers.get("Content-Type", "application/json")); handler.send_header("Cache-Control", "no-store"); handler.send_header("Connection", "close"); handler.end_headers()
             while True:
                 chunk = response.read(64 * 1024)
                 if not chunk: break

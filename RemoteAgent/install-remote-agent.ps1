@@ -17,6 +17,8 @@ function Require-UserPath([string]$Path) {
 function Atomic-Copy([string]$Name, [string]$Destination, [bool]$Executable = $false) {
     $source = Join-Path $SourceRoot $Name
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { Fail "Staged source is missing $Name" }
+    $parent = Split-Path -Parent $Destination
+    if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
     $tmp = "$Destination.new.$([guid]::NewGuid().ToString('N'))"
     Copy-Item -LiteralPath $source -Destination $tmp -Force
     Move-Item -LiteralPath $tmp -Destination $Destination -Force
@@ -44,7 +46,8 @@ foreach ($module in $modules) {
     Atomic-Copy $module $destination
 }
 
-$pythonExe = $python.Source
+$pythonExe = if ($python.Source) { $python.Source } else { $python.Path }
+if ([string]::IsNullOrWhiteSpace($pythonExe)) { Fail "The selected Python launcher has no executable path." }
 $pythonArgs = if ($python.Name -eq "py.exe") { @("-3") } else { @() }
 @"
 @echo off

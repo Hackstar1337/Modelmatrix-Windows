@@ -29,7 +29,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from agent_core import AgentError
@@ -518,6 +518,95 @@ class EngineFinder:
         return [llama, ollama]
 
 
+
+class WindowsEngineFinder:
+    """Find native Windows engines using the registry, PATH, and safe defaults."""
+
+    def __init__(self, paths: HFHostPaths, registry: EngineRegistry,
+                 run: Callable[..., tuple[int | None, str]] = run_command,
+                 which: Callable[[str], str | None] = shutil.which):
+        self.paths, self.registry, self.run, self.which = paths, registry, run, which
+        self.custom_paths: dict[str, str] = {}
+        self._versions: dict[tuple[str, float], tuple[str | None, str | None]] = {}
+        self.lock = threading.Lock()
+
+    def set_custom_paths(self, values: dict[str, str]) -> None:
+        self.custom_paths = dict(values)
+
+    def forget_versions(self) -> None:
+        with self.lock:
+            self._versions.clear()
+
+    def _custom_candidates(self, engine: str, executable: str) -> list[str]:
+        configured = self.custom_paths.get(engine)
+        if not configured:
+            return []
+        path = Path(configured).expanduser()
+        return [str(path / executable), str(path)] if path.is_dir() else [str(path)]
+
+    @staticmethod
+    def _version(path: str, run: Callable[..., tuple[int | None, str]] = run_command) -> tuple[str | None, str | None]:
+        environment = {**os.environ, "PATH": str(Path(path).parent) + os.pathsep + os.environ.get("PATH", "")}
+        dll_context = None
+        try:
+            add_dll_directory = getattr(os, "add_dll_directory", None)
+            if add_dll_directory and os.name == "nt":
+                try:
+                    dll_context = add_dll_directory(str(Path(path).resolve().parent))
+                except OSError:
+                    dll_context = None
+            code, output = run([path, "--version"], 30, environment)
+        finally:
+            if dll_context is not None:
+                dll_context.close()
+        if code != 0:
+            return None, (output or "process failed").strip()[-200:]
+        match = re.search(r"version:\s*([^\r\n]+)", output or "", re.IGNORECASE)
+        return (match.group(1).strip() if match else "unknown"), None
+
+    def _candidate(self, engine: str, executable: str) -> list[str]:
+        record = self.registry.get(engine) or {}
+        managed = str(record.get("path") or "")
+        return [managed, *self._custom_candidates(engine, executable), self.which(executable) or "",
+                self.which(executable.removesuffix(".exe")) or ""]
+
+    def llama_server(self) -> tuple[str | None, bool]:
+        record = self.registry.get("llama.cpp") or {}
+        managed = str(record.get("path") or "")
+        if managed and Path(managed).is_file():
+            return managed, True
+        defaults = [
+            str(self.paths.engines / "llama.cpp" / "bin" / "llama-server.exe"),
+            str(Path(os.environ.get("LOCALAPPDATA", "")) / "llama.cpp" / "llama-server.exe"),
+        ]
+        for candidate in (*self._custom_candidates("llama.cpp", "llama-server.exe"),
+                          self.which("llama-server.exe") or "", self.which("llama-server") or "", *defaults):
+            if candidate and Path(candidate).is_file():
+                return candidate, False
+        return None, False
+
+    def detect(self) -> list[dict[str, Any]]:
+        path, managed = self.llama_server()
+        version, problem = self._version(path, self.run) if path else (None, None)
+        llama = {"id": "llama.cpp", "name": "llama.cpp", "installed": version is not None,
+                 "path": path, "version": version, "managed": managed,
+                 "installed_by": "ModelMatrix" if managed else ("manual" if path else None),
+                 "running": None, "note": problem, "applicable": True,
+                 "actions": ["install", "update", "uninstall"]}
+        ollama = next((candidate for candidate in self._custom_candidates("ollama", "ollama.exe")
+                       if Path(candidate).is_file()), None)
+        ollama = ollama or self.which("ollama.exe") or self.which("ollama")
+        o_version, o_problem = self._version(ollama, self.run) if ollama else (None, None)
+        return [llama, {"id": "ollama", "name": "Ollama", "applicable": True,
+                        "installed": bool(ollama), "path": ollama, "version": o_version,
+                        "running": False, "managed": False,
+                        "installed_by": "manual" if ollama else None,
+                        "note": o_problem or ("Ollama is detected but its Windows installer is manual." if ollama else None),
+                        "actions": []},
+                {"id": "mlx-lm", "name": "MLX", "applicable": False, "installed": False,
+                 "managed": False, "actions": [],
+                 "note": "MLX requires Apple Silicon and Metal; Windows cannot run it."}]
+
 def _ollama_server_version() -> str | None:
     try:
         with urllib.request.urlopen(f"{OLLAMA_URL}/api/version", timeout=2) as response:
@@ -541,19 +630,28 @@ def fetch_verified(
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     digest = hashlib.sha256()
     received = 0
-    with opener(request, 60) as response, target.open("wb") as out:
-        while True:
-            if should_stop():
-                raise _Stopped()
-            chunk = response.read(CHUNK_BYTES)
-            if not chunk:
-                break
-            received += len(chunk)
-            if received > size:
-                raise HFAgentError(f"{target.name} is larger than the approved {size} bytes; stopped.")
-            digest.update(chunk)
-            out.write(chunk)
-            progress(received)
+    try:
+        with opener(request, 60) as response, target.open("wb") as out:
+            while True:
+                if should_stop():
+                    raise _Stopped()
+                chunk = response.read(CHUNK_BYTES)
+                if not chunk:
+                    break
+                received += len(chunk)
+                if received > size:
+                    raise HFAgentError(f"{target.name} is larger than the approved {size} bytes; stopped.")
+                digest.update(chunk)
+                out.write(chunk)
+                progress(received)
+    except Exception as error:
+        # Closing a response after cancel can surface as an HTTP/socket error
+        # instead of returning an empty read. Cancellation must win that race.
+        if should_stop():
+            raise _Stopped() from error
+        raise
+    if should_stop():
+        raise _Stopped()
     if received != size:
         raise HFAgentError(f"{target.name} ended early ({received} of {size} bytes).")
     if digest.hexdigest() != sha256:
@@ -865,7 +963,7 @@ def _safe_windows_zip_name(name: str) -> str:
     value = name.replace("\\", "/")
     parts = value.split("/")
     reserved = re.compile(r"^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$", re.IGNORECASE)
-    if not value or value.startswith("/") or ":" in parts[0] or any(part in ("", ".", "..") for part in parts):
+    if not value or "\x00" in value or value.startswith("/") or ":" in parts[0] or any(part in ("", ".", "..") for part in parts):
         raise HFAgentError(f"The Windows engine archive contains an unsafe path ({name}).")
     if any(reserved.match(part) for part in parts):
         raise HFAgentError(f"The Windows engine archive contains a reserved path ({name}).")
@@ -926,7 +1024,7 @@ class WindowsEngineInstaller:
         self.paths, self.registry, self.finder, self.opener, self.run = paths, registry, finder, opener, run
         self.on_change = on_change or (lambda engine: None)
         self.in_use = in_use or (lambda folder: None)
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.jobs: dict[str, dict[str, Any]] = {}
         self.order: list[str] = []
         self.cancelled: set[str] = set()
@@ -956,6 +1054,10 @@ class WindowsEngineInstaller:
             job["log"] = job["log"][-LOG_LINES:]
             job["log_count"] += 1
 
+    def _is_cancelled(self, job_id: str) -> bool:
+        with self.lock:
+            return job_id in self.cancelled
+
     def public(self, job: dict[str, Any], since: int | None = None) -> dict[str, Any]:
         with self.lock:
             result = dict(job)
@@ -972,10 +1074,11 @@ class WindowsEngineInstaller:
         return [self.public(self.jobs[key]) for key in reversed(self.order) if key in self.jobs]
 
     def job(self, job_id: str) -> dict[str, Any]:
-        job = self.jobs.get(job_id)
-        if not job:
-            raise HFAgentError(f"No engine job with id {job_id}.", 404, "unknown_item")
-        return job
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not job:
+                raise HFAgentError(f"No engine job with id {job_id}.", 404, "unknown_item")
+            return job
 
     @staticmethod
     def validate(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1017,35 +1120,61 @@ class WindowsEngineInstaller:
             downloaded = staging / archive["name"]
             self._log(job, f"Downloading {archive['name']} ({gb_text(archive['size'])})")
             fetch_verified(archive["url"], downloaded, archive["size"], archive["sha256"], self.opener,
-                           lambda: job["id"] in self.cancelled,
+                           lambda: self._is_cancelled(job["id"]),
                            lambda done: self._log(job, f"Downloaded {done} of {archive['size']} bytes") if done == archive["size"] else None)
+            if self._is_cancelled(job["id"]):
+                raise _Stopped()
             self._log(job, "Checksum OK")
             unpacked = staging / "unpacked"
             safe_extract_zip(downloaded, unpacked)
+            if self._is_cancelled(job["id"]):
+                raise _Stopped()
             server = _find_windows_program(unpacked)
             if server is None:
                 raise HFAgentError("The Windows archive has no llama-server.exe.")
             final = staging / "llama.cpp"
             shutil.move(str(server.parent), str(final / "bin"))
             program = final / "bin" / "llama-server.exe"
+            # Official ZIPs normally place DLLs beside the executable, but keep
+            # this robust to a release wrapper with a separate package root.
+            # Windows does not use POSIX executable bits; preserving the files
+            # and putting all adjacent DLLs beside the server is what matters.
+            bin_folder = program.parent
+            for library in unpacked.rglob("*"):
+                if not library.is_file() or library.suffix.lower() != ".dll":
+                    continue
+                destination = bin_folder / library.name
+                if not destination.exists():
+                    shutil.move(str(library), str(destination))
             path_env = dict(os.environ)
-            path_env["PATH"] = str(program.parent) + os.pathsep + path_env.get("PATH", "")
+            path_env["PATH"] = str(bin_folder) + os.pathsep + path_env.get("PATH", "")
             code, output = self.run([str(program), "--version"], 60, path_env)
+            if self._is_cancelled(job["id"]):
+                raise _Stopped()
             if code != 0:
                 raise HFAgentError(f"This llama.cpp Windows build does not run: {(output or '').strip()[-200:]}")
-            version = str(plan.get("version") or "unknown")
+            version = str(plan.get("version") or "")
+            if not version:
+                match = re.search(r"version:\s*([^\r\n]+)", output or "", re.IGNORECASE)
+                version = match.group(1).strip() if match else "unknown"
             self._log(job, f"llama-server {version} runs.")
-            if self.folder.exists():
-                os.replace(self.folder, backup)
-            os.replace(final, self.folder)
-            self.registry.set("llama.cpp", {"path": str(self.folder / "bin" / "llama-server.exe"),
-                                             "folder": str(self.folder), "version": version,
-                                             "tag": plan.get("tag"), "build": plan.get("build"),
-                                             "installed_at": now_text(), "method": "official"})
-            shutil.rmtree(backup, ignore_errors=True)
-            self._log(job, f"Installed in {self.folder}")
-            job["path"], job["version"] = str(self.folder / "bin" / "llama-server.exe"), version
-            job["state"] = "succeeded"
+            # Serialize the final filesystem/registry commit with cancel().
+            # A cancellation that wins before this transition must not be
+            # overwritten by a late success state.
+            with self.lock:
+                if job["id"] in self.cancelled:
+                    raise _Stopped()
+                if self.folder.exists():
+                    os.replace(self.folder, backup)
+                os.replace(final, self.folder)
+                self.registry.set("llama.cpp", {"path": str(self.folder / "bin" / "llama-server.exe"),
+                                                 "folder": str(self.folder), "version": version,
+                                                 "tag": plan.get("tag"), "build": plan.get("build"),
+                                                 "installed_at": now_text(), "method": "official"})
+                shutil.rmtree(backup, ignore_errors=True)
+                self._log(job, f"Installed in {self.folder}")
+                job["path"], job["version"] = str(self.folder / "bin" / "llama-server.exe"), version
+                job["state"] = "succeeded"
             self.on_change("llama.cpp")
         except _Stopped:
             job["state"] = "cancelled"
@@ -1062,9 +1191,10 @@ class WindowsEngineInstaller:
             self.cancelled.discard(job["id"])
 
     def cancel(self, job_id: str) -> None:
-        job = self.job(job_id)
-        if job["state"] == "running":
-            self.cancelled.add(job_id)
+        with self.lock:
+            job = self.job(job_id)
+            if job["state"] == "running":
+                self.cancelled.add(job_id)
 
     def uninstall(self, job_id: str | None = None) -> dict[str, Any]:
         record = self.registry.get("llama.cpp")
@@ -1211,7 +1341,9 @@ class DownloadManager:
     def _load(self) -> None:
         saved = read_json(self.file, [])
         for job in saved if isinstance(saved, list) else []:
-            if not isinstance(job, dict) or not isinstance(job.get("id"), str):
+            if not isinstance(job, dict) or not isinstance(job.get("id"), str) or not JOB_ID_RE.match(job["id"]):
+                continue
+            if not isinstance(job.get("state"), str) or job["state"] not in ACTIVE_STATES + ("paused",) + FINISHED_STATES:
                 continue
             if job.get("state") in ACTIVE_STATES:
                 job["state"] = "queued"
@@ -1887,6 +2019,10 @@ class ProfileMaker:
         self.poll_seconds = poll_seconds
         self.lock = threading.Lock()
 
+    def _log_path(self, name: str, profile: dict[str, str] | None = None) -> Path:
+        safe = re.sub(r"[^A-Za-z0-9._ -]+", "_", str((profile or {}).get("LOG_ALIAS") or name)).strip(" .") or "model"
+        return Path(f"/tmp/{safe}.log")
+
     def run(self, manager: DownloadManager, job_id: str, explicit: bool) -> None:
         with manager.lock:
             job = manager.jobs.get(job_id)
@@ -1962,7 +2098,7 @@ class ProfileMaker:
         if ready:
             ready, detail = self.chat(f"http://127.0.0.1:{port}/v1", model)
         if not ready:
-            log = _tail(Path(f"/tmp/{''.join(c if c.isalnum() or c in '_.-' else '_' for c in name)}.log"), 25)
+            log = _tail(self._log_path(name, self.host.profiles().get(name, {})), 25)
             manager._set(job, profile_state="start_failed", profile_log=log,
                          profile_message=f"{name} did not start: {detail}. {start_failure_hint(log)}")
             try:
@@ -2015,7 +2151,7 @@ class ProfileMaker:
                  "--alias", shlex.quote(model), "-c", str(job["context"]), "-ngl", "999"]
         if job.get("projector_file"):
             parts += ["--mmproj", shlex.quote(str(folder / job["projector_file"]))]
-        library = shlex.quote(str(Path(program).parent))
+        library = shlex.quote(str(PurePosixPath(program).parent))
         command = f"env LD_LIBRARY_PATH={library}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}} " + " ".join(parts)
         lines = [
             f"# Created by ModelMatrix from Hugging Face: {job['repo']} ({job['label']}).",
@@ -2082,6 +2218,71 @@ class ProfileMaker:
         return None
 
 
+
+class WindowsProfileMaker(ProfileMaker):
+    """Windows profile adapter: JSON values and native argv, never shell quoting."""
+
+    @staticmethod
+    def _safe_name(raw: str) -> str:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).rstrip(" .") or "model"
+        if safe.split(".", 1)[0].upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}:
+            safe = f"_{safe}"
+        return safe
+
+    def _log_path(self, name: str, profile: dict[str, str] | None = None) -> Path:
+        alias = str((profile or {}).get("LOG_ALIAS") or name)
+        base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+        return base / "ModelMatrix" / "logs" / f"{self._safe_name(alias)}.log"
+
+    @staticmethod
+    def _unique_name(job: dict[str, Any], profiles: dict[str, dict[str, str]], directory: Path) -> str:
+        base = job.get("profile_hint") or _slug(f"{base_model_name(job['repo'])}-{job['label']}")
+        name, number = base, 2
+        while name in profiles or (directory / f"{name}.json").exists():
+            name, number = f"{base}-{number}", number + 1
+        return name
+
+    def _write_profile(self, job: dict[str, Any], server: str | None) -> tuple[str, str, int]:
+        directory = self.host.directory()
+        profiles = self.host.profiles()
+        existing = job.get("profile")
+        mine = existing if existing and profiles.get(existing, {}).get("HF_DOWNLOAD_ID") == job["id"] else None
+        others = {key: value for key, value in profiles.items() if key != mine}
+        name = mine or self._unique_name(job, others, directory)
+        model = profiles.get(mine, {}).get("REQUEST_MODEL") if mine else None
+        model = model or self._unique_model(job, others)
+        used_ports = {port for port in (_profile_port(values) for values in others.values()) if port}
+        old_port = _profile_port(profiles.get(mine, {})) if mine else None
+        port = old_port if old_port and not self.port_in_use(old_port) else None
+        if port is None:
+            reserved = self.host.reserved_ports()
+            port = next((candidate for candidate in range(8081, 9000)
+                         if candidate not in used_ports and candidate not in reserved and not self.port_in_use(candidate)), None)
+        if port is None:
+            raise HFAgentError("No free port between 8081 and 8999 for the new model.")
+        folder = Path(job["folder"])
+        model_path = str(folder / job["main_file"])
+        program = server or str(self.finder.paths.engines / "llama.cpp" / "bin" / "llama-server.exe")
+        args = ["-m", model_path, "--host", "127.0.0.1", "--port", str(port), "--alias", model,
+                "-c", str(job["context"]), "-ngl", "999"]
+        if job.get("projector_file"):
+            args.extend(["--mmproj", str(folder / job["projector_file"])])
+        full_argv = [str(program), *args]
+        env_path = str(Path(program).parent) + os.pathsep + os.environ.get("PATH", "")
+        profile = {"DISPLAY_NAME": f"{job['display_name']} ({job['label']})", "RUNTIME": "llama.cpp",
+                   "HOST": "127.0.0.1", "PORT": str(port), "REQUEST_MODEL": model,
+                   "SERVER_MODEL_ID": model, "MODEL_PATH": model_path, "CONTEXT_SIZE": str(job["context"]),
+                   "HF_REPO": job["repo"], "HF_REVISION": job["revision"], "HF_VERSION": job["label"],
+                   "HF_DOWNLOAD_ID": job["id"], "START_COMMAND_JSON": json.dumps(full_argv),
+                   "SERVER_ARGS_JSON": json.dumps(args), "PATH": env_path,
+                   "WORKING_DIRECTORY": str(Path(program).parent), "LOG_ALIAS": name}
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / f"{name}.json"
+        temporary = directory / f".{target.name}.{os.getpid()}.tmp"
+        temporary.write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8")
+        os.replace(temporary, target)
+        return name, model, port
+
 def _answers_models(url: str) -> bool:
     try:
         with urllib.request.urlopen(url, timeout=2) as response:
@@ -2115,15 +2316,23 @@ class HFHost:
     ):
         self.service = service
         self.paths = paths or HFHostPaths(Path(service.configuration.root))
-        self.facts = facts or HostFacts()
+        # Explicit adapters are used by the Linux fixtures and by callers that
+        # provide their own probes.  Automatic native selection is only for a
+        # completely unconfigured host, so those adapters remain authoritative.
+        native_windows = platform.system().lower() == "windows" and not any(
+            adapter is not None for adapter in (facts, finder, profile_host)
+        )
+        self.facts = facts or (WindowsHostFacts() if native_windows else HostFacts())
         self.registry = EngineRegistry(self.paths.state / "engines.json")
-        self.finder = finder or EngineFinder(self.paths, self.registry)
+        self.finder = finder or (WindowsEngineFinder(self.paths, self.registry) if native_windows else EngineFinder(self.paths, self.registry))
         self.profile_host = profile_host or AgentProfileHost(service)
-        self.profiles = ProfileMaker(
+        profile_type = WindowsProfileMaker if native_windows else ProfileMaker
+        self.profiles = profile_type(
             self.profile_host, self.finder, lambda: self.facts.payload(self.paths), **(profile_options or {}),
         )
         self.downloads = DownloadManager(self.paths, self.profiles, fetch=fetch, ollama=ollama, start_worker=start_worker)
-        self.installer = EngineInstaller(
+        installer_type = WindowsEngineInstaller if native_windows else EngineInstaller
+        self.installer = installer_type(
             self.paths, self.registry, self.finder, opener=opener,
             on_change=lambda engine: self.downloads.engine_changed(), in_use=self._running_profile_using,
         )

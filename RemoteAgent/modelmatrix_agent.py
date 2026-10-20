@@ -7,6 +7,7 @@ import argparse
 import getpass
 import hmac
 import json
+import ntpath
 import os
 import re
 import shlex
@@ -108,6 +109,7 @@ from platform_support import (
     config_lock,
     default_agent_root,
     default_profiles_dir,
+    safe_windows_component,
     windows_process_supervisor,
 )
 from discovery import (  # noqa: E402
@@ -159,6 +161,12 @@ PROFILE_SCAN_MAX_DEPTH = 5
 PROFILE_SCAN_MAX_CANDIDATES = 8
 
 _WINDOWS_PROCESS_ADAPTER = windows_process_supervisor()
+
+_WINDOWS_UNSUPPORTED_RUNTIMES = frozenset({
+    "mlx", "rvllm-mlx", "vllm-mlx", "ddtree-mlx", "mlx-vlm",
+    "mlx-omni-server", "mlx-openai-server", "mlx-llm-server", "mlx-serve",
+    "mlxengine", "ollmlx", "omlx", "mlc-llm",
+})
 
 
 @dataclass(frozen=True)
@@ -336,11 +344,34 @@ class ProfileRepository:
 
     def _load_profile_files(self) -> dict[str, Profile]:
         profiles: dict[str, Profile] = {}
+        seen_names: dict[str, str] = {}
         for file in _iter_profile_files(self.directory):
             profile = _try_profile_from_file(file)
             if profile is not None:
+                key = file.stem.casefold() if IS_WINDOWS else file.stem
+                previous = seen_names.get(key)
+                if previous is not None:
+                    sys.stderr.write(
+                        f"[profiles] skipping case-insensitive duplicate {file.name}; "
+                        f"already loaded {previous}\n"
+                    )
+                    continue
+                seen_names[key] = file.name
                 profiles[file.stem] = profile
         return profiles
+
+    @staticmethod
+    def _lookup(profiles: dict[str, Profile], name: str) -> Profile | None:
+        if name in profiles:
+            return profiles[name]
+        if not IS_WINDOWS:
+            return None
+        folded = name.casefold()
+        return next(
+            (profile for profile_name, profile in profiles.items()
+             if profile_name.casefold() == folded),
+            None,
+        )
 
     def _claim_path_under_directory(self, claim: dict[str, Any], directory: Path) -> bool:
         claim_path = Path(str(claim.get("path") or ""))
@@ -375,7 +406,8 @@ class ProfileRepository:
             profile = self._profile_from_nested_claim(claim)
             if profile is None:
                 continue
-            profiles.setdefault(profile.name, profile)
+            if self._lookup(profiles, profile.name) is None:
+                profiles[profile.name] = profile
 
     def load(self) -> dict[str, Profile]:
         if not path_is_dir(self.directory):
@@ -385,7 +417,7 @@ class ProfileRepository:
         return profiles
 
     def profile(self, name: str) -> Profile:
-        profile = self.load().get(name)
+        profile = self._lookup(self.load(), name)
         if profile is None:
             raise ProfileNotFoundError(name)
         return profile
@@ -500,6 +532,10 @@ def _require_managed_start(profile: Profile) -> None:
 
 def build_start_command(profile: Profile) -> str:
     """Return the shell command that launches this profile's model server."""
+    if IS_WINDOWS and profile.runtime in _WINDOWS_UNSUPPORTED_RUNTIMES:
+        raise UnsupportedError(
+            f"{profile.name}: runtime {profile.runtime} is not supported natively on Windows"
+        )
     if profile.get("START_COMMAND_JSON") is not None or profile.get("SERVER_ARGS_JSON") is not None:
         try:
             argv, _ = command_argv(profile.values, "")
@@ -867,7 +903,7 @@ def _popen_profile_bash(
     if IS_WINDOWS:
         values = dict(environment)
         profile_values = {key: str(value) for key, value in environment.items() if key in {
-            "START_COMMAND", "START_COMMAND_JSON", "SERVER_ARGS_JSON", "SERVER_BIN", "EXTRA_ARGS_JSON", "SHELL"
+            "START_COMMAND", "START_COMMAND_JSON", "SERVER_ARGS_JSON", "SERVER_BIN", "EXTRA_ARGS_JSON", "SHELL", "PORT", "HOST"
         }}
         try:
             if profile_values.get("START_COMMAND_JSON") or profile_values.get("SERVER_ARGS_JSON") or profile_values.get("SERVER_BIN") or profile_values.get("START_COMMAND"):
@@ -883,8 +919,12 @@ def _popen_profile_bash(
             venv = environment.get("VENV")
             if venv:
                 values = augment_windows_path(values, venv=venv)
-                if Path(argv[0]).name.lower() in {"python", "python3", "python.exe", "python3.exe"}:
-                    argv[0] = str(Path(venv) / "Scripts" / "python.exe")
+                basename = ntpath.basename(argv[0]).lower()
+                is_bare_python = not ntpath.dirname(argv[0]) and basename in {
+                    "python", "python3", "python.exe", "python3.exe"
+                }
+                if is_bare_python:
+                    argv[0] = ntpath.join(str(venv), "Scripts", "python.exe")
             if argv[0].lower() in {"llama-server", "llama-server.exe"}:
                 argv[0] = environment.get("SERVER_BIN") or "llama-server.exe"
             return _WINDOWS_PROCESS_ADAPTER.launch(argv, cwd=cwd, env=values, log_handle=log_handle, shell=shell)
@@ -1572,6 +1612,7 @@ class AgentService:
         self._children: dict[str, subprocess.Popen] = {}
         self._benchmark_lock = threading.Lock()
         self._benchmark_running = False
+        self._benchmark_cancel = threading.Event()
         # Hugging Face downloads, engine installs and profiles (created by serve).
         self.hf: HFHost | None = None
 
@@ -2008,6 +2049,17 @@ class AgentService:
         self._discard_stale_benchmark_pid()
         return self._benchmark_status_payload(self._benchmark_log_path())
 
+    def benchmark_results(self) -> dict[str, Any]:
+        payload = _json_object_file(self._benchmark_latest_json())
+        if payload is None:
+            return {"generated_at": None, "suite": None, "profiles": [], "benchmarks": []}
+        return {
+            "generated_at": payload.get("generated_at"),
+            "suite": payload.get("suite"),
+            "profiles": payload.get("profiles") or [],
+            "benchmarks": [item for item in payload.get("benchmarks") or [] if isinstance(item, dict)],
+        }
+
     def _benchmark_status_payload(self, log_path: Path) -> dict[str, Any]:
         running = self._benchmark_running
         return {
@@ -2015,6 +2067,7 @@ class AgentService:
             "pid": self._read_benchmark_pid() if running else None,
             "log_path": str(log_path) if log_path.exists() or running else None,
             "latest": self._latest_benchmark_report(),
+            "cancel_requested": self._benchmark_cancel.is_set() if running else False,
         }
 
     def _discard_stale_benchmark_pid(self) -> None:
@@ -2032,7 +2085,15 @@ class AgentService:
         with self._benchmark_lock:
             if self._benchmark_running:
                 raise OperationFailedError("benchmark already running")
+            self._benchmark_cancel.clear()
             self._benchmark_running = True
+
+    def cancel_benchmark(self) -> dict[str, Any]:
+        with self._benchmark_lock:
+            if not self._benchmark_running:
+                return self.benchmark_status()
+            self._benchmark_cancel.set()
+        return self.benchmark_status()
 
     def _start_benchmark_worker(
         self,
@@ -2111,6 +2172,7 @@ class AgentService:
                 self._benchmark_pid_file().unlink(missing_ok=True)
                 with self._benchmark_lock:
                     self._benchmark_running = False
+                self._benchmark_cancel.clear()
 
         threading.Thread(target=worker, name="mmx-benchmark", daemon=True).start()
 
@@ -2218,6 +2280,9 @@ class AgentService:
         prompts = self._benchmark_prompts(suite)
         reports: list[dict[str, Any]] = []
         for name in names:
+            if self._benchmark_cancel.is_set():
+                self._benchmark_log(log_path, "benchmark cancelled")
+                break
             self._benchmark_named_profile(
                 name,
                 suite=suite,
@@ -3022,7 +3087,7 @@ class AgentService:
     # -- internals ---------------------------------------------------------
 
     def _pid_file(self, name: str) -> Path:
-        return self.configuration.run_directory / f"{name}.pid"
+        return self.configuration.run_directory / f"{safe_windows_component(name)}.pid"
 
     def _read_pid(self, name: str) -> int | None:
         try:
@@ -3428,7 +3493,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
         self._dispatch_accepted(method, path)
 
     def _dispatch_routed(self, method: str, path: str, body: bytes) -> None:
-        if method == "POST" and path == "/api/connect/inference":
+        if method in {"GET", "POST"} and path == "/api/connect/inference":
             forward_connection(self, body)
             return
         handler = self._route(method, path)
@@ -3449,6 +3514,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             ("GET", "/api/ports"): lambda _: service.ports_payload(),
             ("GET", "/api/doctor"): lambda _: service.doctor_report(),
             ("GET", "/api/benchmark/status"): lambda _: service.benchmark_status(),
+            ("GET", "/api/benchmark/results"): lambda _: service.benchmark_results(),
             ("GET", "/api/host/metrics"): lambda _: host_metrics_payload(),
             ("GET", "/api/integrations"): lambda _: {
                 "integrations": [],
@@ -3463,6 +3529,7 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             ("POST", "/api/integrations/run"): self._run_integration_action(service),
             ("POST", "/api/config/profiles-dir"): self._set_profiles_dir_action(service),
             ("POST", "/api/benchmark/start"): self._benchmark_start_action(service),
+            ("POST", "/api/benchmark/cancel"): lambda _: service.cancel_benchmark(),
         }
         routes.update(self._usage_routes())
         hf = getattr(service, "hf", None)
@@ -4219,6 +4286,7 @@ class UsageRelayHandler(BaseHTTPRequestHandler):
             "endpoint": urllib.parse.urlparse(path).path, "method": method,
         }
         connection = http.client.HTTPConnection(target.host, target.port, timeout=900)
+        headers_sent = False
         try:
             headers = {k: v for k, v in self.headers.items() if k.lower() not in _USAGE_HOP_HEADERS}
             headers["Host"] = f"{target.host}:{target.port}"
@@ -4241,6 +4309,7 @@ class UsageRelayHandler(BaseHTTPRequestHandler):
                 self.send_header("Transfer-Encoding", "chunked")
             self.send_header("Connection", "close")
             self.end_headers()
+            headers_sent = True
             self.close_connection = True
             reader = getattr(response, "read1", None)
             while method != "HEAD":
@@ -4261,11 +4330,20 @@ class UsageRelayHandler(BaseHTTPRequestHandler):
             if response.status >= 400:
                 record["error"] = f"HTTP {response.status}"
         except (OSError, http.client.HTTPException) as error:
-            record.update({"status": 502, "error": f"upstream error: {error}", "duration_ms": (time.time() - started) * 1000})
-            try:
-                self._send_error_json(502, "upstream_error", f"model server did not answer: {error}")
-            except OSError:
-                pass
+            # Once response headers are sent, a broken pipe means the client
+            # cancelled the stream.  Never append a second HTTP response to a
+            # partially delivered body; closing the upstream socket in the
+            # finally block is the cancellation signal.
+            record.update({
+                "status": 499 if headers_sent else 502,
+                "error": "client_cancelled" if headers_sent else f"upstream error: {error}",
+                "duration_ms": (time.time() - started) * 1000,
+            })
+            if not headers_sent:
+                try:
+                    self._send_error_json(502, "upstream_error", f"model server did not answer: {error}")
+                except OSError:
+                    pass
         finally:
             connection.close()
             if metered:

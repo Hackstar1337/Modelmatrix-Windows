@@ -18,7 +18,7 @@ interface DoctorReport {
 
 export function SettingsPage() {
   const { settings, update, info, status, bridge, bridgeCommand, toast, refreshStatus, refreshOverview } = useApp();
-  const { capabilities, bridgeLabel, folderLabel, localHostLabel, platform } = usePlatform();
+  const { capabilities, bridgeLabel, folderLabel, localHostLabel, platform, desktopActionsAvailable } = usePlatform();
   const usage = usePoll<RelayStatus & { capture?: CaptureState[] }>((signal) => api("/api/usage/settings", { signal }), 6000);
   const [retention, setRetention] = useState<string>("");
   const [profilesDir, setProfilesDir] = useState("");
@@ -72,7 +72,7 @@ export function SettingsPage() {
         <div className="setting-row">
           <div>
             <div className="title">Theme</div>
-            <div className="desc">Dark matches the menu bar app's default look.</div>
+            <div className="desc">Choose the dashboard theme for this browser.</div>
           </div>
           <div className="seg sm">
             {(["dark", "light"] as const).map((theme) => (
@@ -247,10 +247,10 @@ export function SettingsPage() {
           <span className="hint">Every .env or .json file in this folder is a model profile.</span>
         </div>
         <div className="btn-row" style={{ marginTop: 14 }}>
-          <button className="btn" disabled={!bridge?.app_connected || !capabilities.open_folders} onClick={() => appAction("app.open_profiles_folder", `Opened profiles folder in ${folderLabel.replace(/^Open in /, "")}`)}>
+          <button className="btn" disabled={!desktopActionsAvailable || !bridge?.app_connected || !capabilities.open_folders} onClick={() => appAction("app.open_profiles_folder", `Opened profiles folder in ${folderLabel.replace(/^Open in /, "")}`)}>
             <FolderOpen size={14} /> {folderLabel}
           </button>
-          <button className="btn" disabled={!bridge?.app_connected} onClick={() => appAction("app.open_logs", "Opened logs folder")}>
+          <button className="btn" disabled={!desktopActionsAvailable || !bridge?.app_connected} onClick={() => appAction("app.open_logs", "Opened logs folder")}>
             <ScrollText size={14} /> Open logs
           </button>
         </div>
@@ -354,22 +354,22 @@ export function SettingsPage() {
               <dd>{String(bridge.app.last_active_profile ?? "-")}</dd>
             </dl>
             <div className="btn-row">
-              <button className="btn" onClick={() => appAction("app.open_settings", "Opened menu bar app settings")}>
+              <button className="btn" disabled={!desktopActionsAvailable} onClick={() => appAction("app.open_settings", `Opened ${bridgeLabel.toLowerCase()} settings`)}>
                 <AppWindow size={14} /> Open app settings
               </button>
-              <button className="btn" onClick={() => appAction("app.open_usage", "Opened Usage in the menu bar")}>
+              <button className="btn" disabled={!desktopActionsAvailable} onClick={() => appAction("app.open_usage", `Opened Usage in the ${bridgeLabel.toLowerCase()}`)}>
                 <AppWindow size={14} /> Usage in menu bar
               </button>
-              <button className="btn" onClick={() => appAction("app.open_profiles", "Opened Profiles in the menu bar")}>
+              <button className="btn" disabled={!desktopActionsAvailable} onClick={() => appAction("app.open_profiles", `Opened Profiles in the ${bridgeLabel.toLowerCase()}`)}>
                 <AppWindow size={14} /> Profiles in menu bar
               </button>
-              <button className="btn" onClick={() => appAction("app.open_optimize", "Opened Optimize in the menu bar")}>
+              <button className="btn" disabled={!desktopActionsAvailable} onClick={() => appAction("app.open_optimize", `Opened Optimize in the ${bridgeLabel.toLowerCase()}`)}>
                 <AppWindow size={14} /> Optimize in menu bar
               </button>
-              <button className="btn" onClick={() => appAction("app.open_downloads", "Opened Downloads in the menu bar")}>
+              <button className="btn" disabled={!desktopActionsAvailable} onClick={() => appAction("app.open_downloads", `Opened Downloads in the ${bridgeLabel.toLowerCase()}`)}>
                 <AppWindow size={14} /> Downloads in menu bar
               </button>
-              <button className="btn" onClick={() => appAction("app.refresh", "Menu bar app refreshed")}>
+              <button className="btn" disabled={!desktopActionsAvailable} onClick={() => appAction("app.refresh", `${bridgeLabel} refreshed`)}>
                 <RefreshCw size={14} /> Refresh app
               </button>
             </div>

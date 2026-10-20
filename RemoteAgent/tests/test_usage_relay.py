@@ -113,6 +113,7 @@ class UsageStoreTests(unittest.TestCase):
         self.store = UsageStore(Path(self.directory.name) / "usage.sqlite3")
 
     def tearDown(self) -> None:
+        self.store._db.close()  # noqa: SLF001 - release SQLite's Windows file handle first.
         self.directory.cleanup()
 
     def _row(self, **overrides) -> dict:

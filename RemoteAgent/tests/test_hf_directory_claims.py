@@ -59,7 +59,7 @@ class HFDirectoryClaimTests(unittest.TestCase):
             missing = agent.missing_local_model_artifacts(
                 {"MODEL_FILE": "/run/user/126/model.gguf"}
             )
-        self.assertEqual(missing, ["/run/user/126/model.gguf"])
+        self.assertEqual(missing, [str(Path("/run/user/126/model.gguf"))])
 
 
 if __name__ == "__main__":

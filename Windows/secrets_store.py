@@ -15,6 +15,8 @@ import os
 import re
 import secrets
 import stat
+import getpass
+import subprocess
 import tempfile
 from contextlib import contextmanager
 from ctypes import wintypes
@@ -49,6 +51,8 @@ class SecretStore:
             self.directory.mkdir(parents=True, exist_ok=True)
             if not self._windows:
                 os.chmod(self.directory, stat.S_IRWXU)
+            else:
+                _harden_acl(self.directory, directory=True)
         except OSError as error:
             raise SecretStoreError(f"cannot initialize secret storage: {error}") from error
 
@@ -90,6 +94,8 @@ class SecretStore:
             if not self._windows:
                 os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR)
             os.replace(temporary, self.path)
+            if self._windows:
+                _harden_acl(self.path, directory=False)
         except OSError as error:
             raise SecretStoreError("cannot commit protected secret store") from error
         finally:
@@ -196,3 +202,25 @@ def _crypt(data: bytes, *, protect: bool) -> bytes:
         local_free.argtypes = [wintypes.HLOCAL]
         local_free.restype = wintypes.HLOCAL
         local_free(outgoing.pbData)
+
+
+def _harden_acl(path: Path, *, directory: bool) -> None:
+    """Remove inherited ACLs and grant the current user full access only."""
+    if os.name != "nt":
+        return
+    user = getpass.getuser()
+    domain = os.environ.get("USERDOMAIN")
+    principal = f"{domain}\\{user}" if domain else user
+    permission = "(OI)(CI)F" if directory else "F"
+    try:
+        completed = subprocess.run(
+            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{principal}:{permission}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError as error:
+        raise SecretStoreError("Windows ACL hardening is unavailable") from error
+    if completed.returncode != 0:
+        raise SecretStoreError("Windows ACL hardening failed")

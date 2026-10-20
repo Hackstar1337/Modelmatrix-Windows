@@ -13,32 +13,34 @@ if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
 }
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { $OutputDirectory = Join-Path $SourceRoot 'dist-windows' }
 $SourceRoot = [IO.Path]::GetFullPath($SourceRoot); $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory); Ensure-Dir $OutputDirectory
+if ($Version -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') { throw 'Version must contain only letters, numbers, dots, underscores, or hyphens.' }
+if ([IO.Path]::GetFullPath($OutputDirectory).TrimEnd('\') -eq $SourceRoot.TrimEnd('\')) { throw 'OutputDirectory must not be the source checkout root.' }
 if (-not $SkipBuild) { & (Join-Path $PSScriptRoot 'build-windows.ps1') -SourceRoot $SourceRoot }
 if (-not (Test-Path -LiteralPath (Join-Path $SourceRoot 'Dashboard\dist\index.html') -PathType Leaf)) { throw 'Dashboard/dist/index.html is required; do not package an unbuilt dashboard.' }
 $stage = Join-Path ([IO.Path]::GetTempPath()) ('ModelMatrix-windows-' + [guid]::NewGuid().ToString('N')); Ensure-Dir $stage
 try {
-    foreach ($relative in @('Windows','RemoteAgent','Dashboard\dist','Scripts')) {
-        $src = Join-Path $SourceRoot $relative
-        if (Test-Path -LiteralPath $src) {
-            $destination = Join-Path $stage $relative
+    function Copy-Tree([string]$Relative, [string[]]$ExcludedNames = @()) {
+        $src = Join-Path $SourceRoot $Relative
+        if (-not (Test-Path -LiteralPath $src -PathType Container)) { return }
+        $base = Join-Path $stage $Relative
+        foreach ($file in Get-ChildItem -LiteralPath $src -Recurse -File -Force) {
+            $parts = $file.FullName.Substring($src.Length).TrimStart('\').Split('\')
+            if ($parts | Where-Object { $_ -in $ExcludedNames -or $_ -eq '__pycache__' -or $_ -like '*.pyc' -or $_ -like '*.pyo' }) { continue }
+            if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Refusing to package reparse point: $($file.FullName)" }
+            $relativeFile = $file.FullName.Substring($src.Length).TrimStart('\')
+            $destination = Join-Path $base $relativeFile
             Ensure-Dir (Split-Path -Parent $destination)
-            Copy-Item -LiteralPath $src -Destination $destination -Recurse -Force
+            Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
         }
     }
+    foreach ($relative in @('Windows','RemoteAgent','Scripts')) { Copy-Tree $relative }
+    Copy-Tree 'Dashboard' @('node_modules','.vite','.git')
     foreach ($relative in @('LICENSE','README.md','SETUP.md','Windows\README.md','Controller\RUNTIME_SUPPORT.md','RemoteAgent\README.md','Dashboard\package.json','Dashboard\pnpm-lock.yaml','Dashboard\pnpm-workspace.yaml')) {
         $src = Join-Path $SourceRoot $relative
         if (Test-Path -LiteralPath $src -PathType Leaf) {
             $destination = Join-Path $stage $relative
             Ensure-Dir (Split-Path -Parent $destination)
             Copy-Item -LiteralPath $src -Destination $destination -Force
-        }
-    }
-    foreach ($relative in @('Windows\tests','RemoteAgent\tests')) {
-        $src = Join-Path $SourceRoot $relative
-        if (Test-Path -LiteralPath $src -PathType Container) {
-            $destination = Join-Path $stage $relative
-            Ensure-Dir (Split-Path -Parent $destination)
-            Copy-Item -LiteralPath $src -Destination $destination -Recurse -Force
         }
     }
     $zip = Join-Path $OutputDirectory ("ModelMatrix-$Version-windows.zip"); if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }; Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal

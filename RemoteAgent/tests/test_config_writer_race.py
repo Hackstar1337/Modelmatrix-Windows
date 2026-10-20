@@ -24,27 +24,30 @@ if str(AGENT_DIR) not in sys.path:
 
 from agent_core import agent_config_path  # noqa: E402
 import modelmatrix_agent as agent  # noqa: E402
+from platform_support import config_lock, config_unlock  # noqa: E402
 
 
 def _config_writer(root_str: str, key: str, installer_style: bool) -> None:
-    """Writes like the agent (save_agent_config) or like the installer
-    (flocks config.json.lock directly), exercising the shared lock name."""
+    """Writes like the agent or installer, exercising the shared lock name."""
     root = Path(root_str)
     if installer_style:
-        import fcntl
-
         for _ in range(25):
             path = agent_config_path(root)
             lock_path = root / "config.json.lock"
-            with open(lock_path, "w", encoding="utf-8") as lock_handle:
-                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-                payload = {}
-                if path.is_file():
-                    payload = json.loads(path.read_text(encoding="utf-8"))
-                payload[key] = "installer-" + key
-                tmp = root / "config.json.tmp"
-                tmp.write_text(json.dumps(payload), encoding="utf-8")
-                os.replace(tmp, path)
+            # Match production's portable Windows/POSIX lock contract.  The
+            # binary handle is required by msvcrt.locking on Windows.
+            with open(lock_path, "a+b") as lock_handle:
+                config_lock(lock_handle)
+                try:
+                    payload = {}
+                    if path.is_file():
+                        payload = json.loads(path.read_text(encoding="utf-8"))
+                    payload[key] = "installer-" + key
+                    tmp = root / "config.json.tmp"
+                    tmp.write_text(json.dumps(payload), encoding="utf-8")
+                    os.replace(tmp, path)
+                finally:
+                    config_unlock(lock_handle)
     else:
         for _ in range(25):
             agent.save_agent_config(root, {key: "value-" + key})
@@ -68,8 +71,15 @@ class SaveAgentConfigTests(unittest.TestCase):
                 )
             for proc in procs:
                 proc.start()
+            try:
+                for proc in procs:
+                    proc.join(timeout=30)
+            finally:
+                # Even when one child fails, release every Windows lock before
+                # TemporaryDirectory attempts to remove the fixture.
+                for proc in procs:
+                    proc.join(timeout=30)
             for proc in procs:
-                proc.join(timeout=30)
                 self.assertEqual(proc.exitcode, 0)
             payload = json.loads(agent_config_path(root).read_text(encoding="utf-8"))
             for index, key in enumerate(keys):

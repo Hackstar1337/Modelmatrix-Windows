@@ -6,14 +6,14 @@ Windows 11 x64 was tested natively, including real GGUF inference. Windows 10 is
 
 ## 1. Get the Windows source
 
-Extract the delivered `ModelMatrix-windows-source.zip` into a writable directory, such as `C:\Projects\ModelMatrix`. Alternatively, restore the delivered Git bundle:
+Clone the public Windows repository into a writable directory:
 
 ```powershell
-git clone .\ModelMatrix-windows-support.bundle ModelMatrix --branch windows-support
-cd .\ModelMatrix
+git clone https://github.com/Hackstar1337/Modelmatrix-Windows.git
+cd .\Modelmatrix-Windows
 ```
 
-The port was **not pushed upstream**. Cloning the original upstream branch alone does not obtain these changes. Keep the complete source layout, including `Windows`, `RemoteAgent`, `Scripts`, and `Dashboard`.
+Alternatively, extract the source ZIP from this repository. The original `Hackstar1337/ModelMatrix` upstream was not changed. Keep the complete source layout, including `Windows`, `RemoteAgent`, `Scripts`, and `Dashboard`.
 
 ## 2. Prerequisites
 
@@ -59,6 +59,8 @@ Open **http://127.0.0.1:7700/**. The shared usage relay defaults to **http://127
 ```
 
 Use `start-windows.cmd -Foreground -NoBrowser` for visible recovery. The optional tray is available from the installed **ModelMatrix Tray** shortcut or `python .\Windows\tray.py --no-browser`; it uses the same controller/API and a per-session mutex.
+
+For custom roots/ports, set `MODELMATRIX_DATA_ROOT` and `MODELMATRIX_CONTROLLER_URL` before starting the tray, and use the CLI's `--endpoint` option. Background startup detaches caller pipe handles and polls authenticated readiness. Shutdown drains accepted HTTP handlers before closing SQLite.
 
 ## 5. Set up the first model
 
@@ -107,11 +109,11 @@ The Dashboard supports token login and revocable HttpOnly sessions. The CLI also
 .\Scripts\build-windows.cmd
 .\Scripts\package-windows.cmd -Version 1.0.0
 python -m unittest discover -s Windows\tests -p 'test*.py' -v
-python -m unittest discover -s RemoteAgent\tests -p 'test_windows_platform.py' -v
+python -m unittest discover -s RemoteAgent\tests -p 'test*.py' -v
 python -m unittest discover -s Windows\examples -p 'test*.py' -v
 ```
 
-Build runs frozen pnpm installation, TypeScript/Vite build, and Python compilation. Package creates a ZIP and SHA-256 file with source/tests, static Dashboard, license, and documentation. It still requires Python and the chosen model/runtime. Code signing is a release-owner step. Windows CI is included but was not triggered on GitHub during this task.
+Build runs frozen pnpm installation, TypeScript/Vite build, and Python compilation. Package creates a ZIP and SHA-256 file with source/tests, static Dashboard, license, and documentation. It still requires Python and the chosen model/runtime. Code signing is a release-owner step. The Windows workflow runs full suites, build, authenticated installed lifecycle and packaging; check the Actions page for its current result. Expected POSIX-only skips are explained in the test report.
 
 ## 8. Stop, optional startup, and uninstall
 

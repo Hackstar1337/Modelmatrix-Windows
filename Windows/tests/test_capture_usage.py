@@ -74,6 +74,10 @@ class CaptureAcceptanceTests(unittest.TestCase):
                     payload = json.loads(response.read())
                 self.assertEqual(payload["usage"], {"prompt_tokens": 3, "completion_tokens": 4})
                 rows = service.usage.store._rows("all")
+                deadline = time.monotonic() + 2
+                while not rows and time.monotonic() < deadline:
+                    time.sleep(.01)
+                    rows = service.usage.store._rows("all")
                 self.assertEqual(len(rows), 1, rows)
                 self.assertEqual(rows[0]["prompt_tokens"], 3)
                 state = service.capture_state()[0]

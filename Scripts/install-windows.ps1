@@ -20,7 +20,10 @@ function Quote-PowerShellLiteral([string]$Value) { "'" + ($Value -replace "'", "
 function Resolve-Python([string]$Requested) {
     if ($Requested) { return (Resolve-Path -LiteralPath $Requested -ErrorAction Stop).Path }
     $python = Get-Command python -ErrorAction SilentlyContinue
-    if ($python) { return $python.Source }
+    if ($python -and $python.Source -notmatch '\\WindowsApps\\python(?:3)?\.exe$') {
+        & $python.Source --version *> $null
+        if ($LASTEXITCODE -eq 0) { return $python.Source }
+    }
     $py = Get-Command py -ErrorAction SilentlyContinue
     if ($py) {
         $raw = & $py.Source -3 -c 'import sys; print(sys.executable)' 2>$null | Out-String
@@ -31,6 +34,7 @@ function Resolve-Python([string]$Requested) {
 }
 $SourceRoot = [IO.Path]::GetFullPath($SourceRoot); $InstallRoot = [IO.Path]::GetFullPath($InstallRoot); $DataRoot = [IO.Path]::GetFullPath($DataRoot)
 if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { throw 'LOCALAPPDATA is not set; run as a normal Windows user.' }
+if ($InstallRoot.TrimEnd('\') -eq $SourceRoot.TrimEnd('\')) { throw 'InstallRoot must not be the source checkout root.' }
 $required = @('Windows\controller.py','Windows\modelmatrixctl.py','Windows\tray.py','RemoteAgent\agent_core.py','RemoteAgent\modelmatrix_agent.py')
 foreach ($item in $required) { if (-not (Test-Path -LiteralPath (Join-Path $SourceRoot $item) -PathType Leaf)) { throw "Missing source file: $item" } }
 $python = Resolve-Python $PythonPath
@@ -44,24 +48,35 @@ if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
     Invoke-Checked $python @('-m','venv',$venv)
 }
 if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) { throw "Python venv creation failed: $venvPython" }
+foreach ($ownedPayload in @('Windows','RemoteAgent','Dashboard')) {
+    $ownedPath = Join-Path $InstallRoot $ownedPayload
+    if (Test-Path -LiteralPath $ownedPath) { Remove-Item -LiteralPath $ownedPath -Recurse -Force }
+}
 foreach ($relative in @('Windows','RemoteAgent')) {
     $from = Join-Path $SourceRoot $relative; $to = Join-Path $InstallRoot $relative
-    Ensure-Dir $to; Copy-Item -LiteralPath $from -Destination (Split-Path -Parent $to) -Recurse -Force
+    Ensure-Dir $to
+    foreach ($file in Get-ChildItem -LiteralPath $from -Recurse -File -Force) {
+        if ($file.FullName -match '\\(__pycache__|.*\.py[co])$' -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
+        $relativeFile = $file.FullName.Substring($from.Length).TrimStart('\')
+        $destination = Join-Path $to $relativeFile
+        Ensure-Dir (Split-Path -Parent $destination)
+        Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
+    }
 }
 Ensure-Dir (Join-Path $InstallRoot 'Dashboard')
 Copy-Item -LiteralPath (Join-Path $SourceRoot 'Dashboard\dist') -Destination (Join-Path $InstallRoot 'Dashboard') -Recurse -Force
 $controllerLauncherPs = Join-Path $InstallRoot 'ModelMatrixController.ps1'
 $dataRootLiteral = Quote-PowerShellLiteral $DataRoot
 $profilesLiteral = Quote-PowerShellLiteral (Join-Path $DataRoot 'profiles')
-@('[CmdletBinding()]', 'param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)', '$ErrorActionPreference = ''Stop''', '$python = Join-Path $PSScriptRoot ''venv\Scripts\python.exe''', '$controller = Join-Path $PSScriptRoot ''Windows\controller.py''', "& `$python `$controller '--root' $dataRootLiteral '--profiles-dir' $profilesLiteral @Arguments", 'exit $LASTEXITCODE') | Set-Content -LiteralPath $controllerLauncherPs -Encoding UTF8
+@('[CmdletBinding()]', 'param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)', '$ErrorActionPreference = ''Stop''', "`$env:MODELMATRIX_DATA_ROOT = $dataRootLiteral", "`$env:MODELMATRIX_PROFILES_DIR = $profilesLiteral", '$python = Join-Path $PSScriptRoot ''venv\Scripts\python.exe''', '$controller = Join-Path $PSScriptRoot ''Windows\controller.py''', "& `$python `$controller '--root' $dataRootLiteral '--profiles-dir' $profilesLiteral @Arguments", 'exit $LASTEXITCODE') | Set-Content -LiteralPath $controllerLauncherPs -Encoding UTF8
 $launcher = Join-Path $InstallRoot 'ModelMatrixController.cmd'
 @('@echo off', 'setlocal', 'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0ModelMatrixController.ps1" %*', 'exit /b %errorlevel%') | Set-Content -LiteralPath $launcher -Encoding ASCII
 $ctlPs = Join-Path $InstallRoot 'modelmatrixctl.ps1'
-@('[CmdletBinding()]', 'param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)', '$ErrorActionPreference = ''Stop''', '$python = Join-Path $PSScriptRoot ''venv\Scripts\python.exe''', '$ctl = Join-Path $PSScriptRoot ''Windows\modelmatrixctl.py''', '& $python $ctl @Arguments', 'exit $LASTEXITCODE') | Set-Content -LiteralPath $ctlPs -Encoding UTF8
+@('[CmdletBinding()]', 'param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)', '$ErrorActionPreference = ''Stop''', '$env:MODELMATRIX_DATA_ROOT = ' + $dataRootLiteral, '$python = Join-Path $PSScriptRoot ''venv\Scripts\python.exe''', '$ctl = Join-Path $PSScriptRoot ''Windows\modelmatrixctl.py''', '& $python $ctl @Arguments', 'exit $LASTEXITCODE') | Set-Content -LiteralPath $ctlPs -Encoding UTF8
 $ctl = Join-Path $InstallRoot 'modelmatrixctl.cmd'
 @('@echo off', 'setlocal', 'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0modelmatrixctl.ps1" %*', 'exit /b %errorlevel%') | Set-Content -LiteralPath $ctl -Encoding ASCII
 $trayPs = Join-Path $InstallRoot 'ModelMatrixTray.ps1'
-@('[CmdletBinding()]', 'param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)', '$ErrorActionPreference = ''Stop''', '$python = Join-Path $PSScriptRoot ''venv\Scripts\python.exe''', '$tray = Join-Path $PSScriptRoot ''Windows\tray.py''', '& $python $tray @Arguments', 'exit $LASTEXITCODE') | Set-Content -LiteralPath $trayPs -Encoding UTF8
+@('[CmdletBinding()]', 'param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)', '$ErrorActionPreference = ''Stop''', '$env:MODELMATRIX_DATA_ROOT = ' + $dataRootLiteral, '$python = Join-Path $PSScriptRoot ''venv\Scripts\python.exe''', '$tray = Join-Path $PSScriptRoot ''Windows\tray.py''', '& $python $tray @Arguments', 'exit $LASTEXITCODE') | Set-Content -LiteralPath $trayPs -Encoding UTF8
 $trayLauncher = Join-Path $InstallRoot 'ModelMatrixTray.cmd'
 @('@echo off', 'setlocal', 'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0ModelMatrixTray.ps1" %*', 'exit /b %errorlevel%') | Set-Content -LiteralPath $trayLauncher -Encoding ASCII
 if (-not $NoShortcuts -or $StartupShortcut) { $ws = New-Object -ComObject WScript.Shell }

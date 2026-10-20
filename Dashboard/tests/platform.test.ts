@@ -11,7 +11,7 @@ test("legacy dashboard info keeps macOS defaults", () => {
   assert.equal(context.bridgeLabel, "Menu bar app");
 });
 
-test("Windows metadata does not pretend native-only features exist", () => {
+test("Windows metadata keeps controller-backed features while disabling unsupported cache purge", () => {
   const context = platformContext({
     name: "ModelMatrix",
     version: "test",
@@ -29,6 +29,8 @@ test("Windows metadata does not pretend native-only features exist", () => {
       open_folders: true,
       quit_apps: true,
       purge_file_cache: false,
+      optimize: true,
+      clipboard: true,
       keep_awake: true,
       remote_gateways: true,
       capture: true,
@@ -40,5 +42,9 @@ test("Windows metadata does not pretend native-only features exist", () => {
   assert.equal(context.localHostLabel, "This PC");
   assert.equal(context.capabilities.purge_file_cache, false);
   assert.equal(context.capabilities.open_folders, true);
+  assert.equal(context.capabilities.quit_apps, true);
+  assert.equal(context.capabilities.optimize, true);
+  assert.equal(context.capabilities.clipboard, true);
+  assert.equal(context.desktopActionsAvailable, true);
   assert.equal(context.bridgeLabel, "Desktop bridge");
 });

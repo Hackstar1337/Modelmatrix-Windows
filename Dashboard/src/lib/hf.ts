@@ -1,5 +1,6 @@
 // Hugging Face models, downloads and engines (controller routes under /api/hf).
-import { api, post, query } from "./api";
+import { api, post } from "./api";
+import { routes } from "./routes";
 
 /* ---------------- Check ---------------- */
 
@@ -295,32 +296,28 @@ export interface HFEngineList {
 /** `host` is a remote host's name, or undefined for this Mac. */
 export const hf = {
   check: (name: string, host?: string, context?: number, signal?: AbortSignal) =>
-    api<HFCheckReport>(`/api/hf/check${query({ name, host, context })}`, { signal }),
-  downloads: (signal?: AbortSignal) => api<{ downloads: HFDownload[]; unreachable?: string[] }>("/api/hf/downloads?host=all", { signal }),
+    api<HFCheckReport>(routes.hf.check(name, host, context).path, { signal }),
+  downloads: (signal?: AbortSignal) => api<{ downloads: HFDownload[]; unreachable?: string[] }>(routes.hf.downloads().path, { signal }),
   models: (signal?: AbortSignal) =>
-    api<{ models: HFDownloadedModel[]; untracked: { folder: string; bytes_on_disk: number }[]; unreachable?: string[] }>("/api/hf/models?host=all", { signal }),
+    api<{ models: HFDownloadedModel[]; untracked: { folder: string; bytes_on_disk: number }[]; unreachable?: string[] }>(routes.hf.models().path, { signal }),
   download: (body: { name: string; version?: string; context?: number; host?: string; engine?: string }) =>
-    post<{ download: HFDownload; existing?: boolean }>("/api/hf/downloads", body),
+    post<{ download: HFDownload; existing?: boolean }>(routes.hf.download(body).path, routes.hf.download(body).body),
   action: (id: string, action: "pause" | "resume" | "cancel" | "start", host?: string, deleteFiles?: boolean) =>
-    post<{ download: HFDownload }>(`/api/hf/downloads/${encodeURIComponent(id)}/${action}`, { host, delete_files: deleteFiles }),
-  removeFromList: (id: string, host?: string) => api(`/api/hf/downloads/${encodeURIComponent(id)}${query({ host })}`, { method: "DELETE" }),
+    post<{ download: HFDownload }>(routes.hf.downloadAction(id, action, host, deleteFiles).path, routes.hf.downloadAction(id, action, host, deleteFiles).body),
+  removeFromList: (id: string, host?: string) => api(routes.hf.removeDownload(id, host).path, { method: "DELETE" }),
   deleteModel: (id: string, deleteFiles: boolean, host?: string) =>
-    post<{ removed: string; files_deleted: boolean; freed_bytes: number; profile_deleted: string | null; kept_in_ollama: boolean }>("/api/hf/models/delete", {
-      id,
-      delete_files: deleteFiles,
-      host,
-    }),
-  settings: () => api<{ settings: HFSettings }>("/api/hf/settings"),
+    post<{ removed: string; files_deleted: boolean; freed_bytes: number; profile_deleted: string | null; kept_in_ollama: boolean }>(routes.hf.deleteModel(id, deleteFiles, host).path, routes.hf.deleteModel(id, deleteFiles, host).body),
+  settings: () => api<{ settings: HFSettings }>(routes.hf.settings().path),
   saveSettings: (patch: Partial<Omit<HFSettings, "token_saved" | "models_folder_path" | "endpoint_in_use" | "free_disk_bytes">>) =>
-    api<{ settings: HFSettings }>("/api/hf/settings", { method: "PUT", body: patch }),
-  saveToken: (token: string) => post<{ saved: boolean; user?: string }>("/api/hf/token", { token }),
-  deleteToken: () => api<{ saved: boolean }>("/api/hf/token", { method: "DELETE" }),
-  engines: (host?: string, refresh = false, signal?: AbortSignal) => api<HFEngineList>(`/api/hf/engines${query({ host, refresh: refresh ? 1 : undefined })}`, { signal }),
+    api<{ settings: HFSettings }>(routes.hf.saveSettings(patch).path, { method: "PUT", body: routes.hf.saveSettings(patch).body }),
+  saveToken: (token: string) => post<{ saved: boolean; user?: string }>(routes.hf.saveToken(token).path, routes.hf.saveToken(token).body),
+  deleteToken: () => api<{ saved: boolean }>(routes.hf.deleteToken().path, { method: "DELETE" }),
+  engines: (host?: string, refresh = false, signal?: AbortSignal) => api<HFEngineList>(routes.hf.engines(host, refresh).path, { signal }),
   plan: (engine: HFEngineId, action: string, host?: string, method?: string) =>
-    post<{ plan: HFEnginePlan }>("/api/hf/engines/plan", { engine, action, host, method }),
-  run: (planId: string) => post<{ job: HFEngineJob }>("/api/hf/engines/run", { plan_id: planId }),
-  job: (id: string, since: number) => api<{ job: HFEngineJob; lines?: string[]; next?: number }>(`/api/hf/engines/jobs/${encodeURIComponent(id)}${query({ since })}`),
-  cancelJob: (id: string) => post<{ job: HFEngineJob }>(`/api/hf/engines/jobs/${encodeURIComponent(id)}/cancel`, {}),
+    post<{ plan: HFEnginePlan }>(routes.hf.enginePlan(engine, action, host, method).path, routes.hf.enginePlan(engine, action, host, method).body),
+  run: (planId: string) => post<{ job: HFEngineJob }>(routes.hf.engineRun(planId).path, routes.hf.engineRun(planId).body),
+  job: (id: string, since: number) => api<{ job: HFEngineJob; lines?: string[]; next?: number }>(routes.hf.engineJob(id, since).path),
+  cancelJob: (id: string) => post<{ job: HFEngineJob }>(routes.hf.cancelEngineJob(id).path, routes.hf.cancelEngineJob(id).body),
 };
 
 /* ---------------- Words ---------------- */

@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -37,6 +38,10 @@ DATA = bytes(range(256)) * 40  # 10,240 bytes
 PROJECTOR = b"mmproj" * 500
 REPO = "owner/Model-GGUF"
 ENDPOINT = "https://huggingface.co"
+POSIX_EXECUTABLE_FIXTURE = unittest.skipUnless(
+    os.name != "nt",
+    "POSIX executable fixture; native Windows executable equivalents are covered by Windows tests",
+)
 
 
 def sha(data: bytes) -> str:
@@ -310,7 +315,7 @@ class HostFactsTests(unittest.TestCase):
         self.assertEqual((facts["accelerator"], facts["budget_source"], facts["gpus"]), ("cpu", "cpu", []))
         self.assertEqual(facts["budget_bytes"], 65536000 * 1024 * 3 // 5)
         self.assertEqual(facts["available_memory_bytes"], 50000000 * 1024)
-        self.assertEqual(facts["models_folder"], "/home/me/ModelMatrix/Models")
+        self.assertEqual(Path(facts["models_folder"]), Path("/home/me/ModelMatrix/Models"))
 
 
 # MARK: Engines
@@ -364,6 +369,7 @@ class EngineTests(unittest.TestCase):
         archives = [{"url": url, "size": len(archive), "sha256": checksum or sha(archive)}, *extra]
         return {"engine": "llama.cpp", "archives": archives, "build": "Linux x64 (processor)", "tag": "b9999"}
 
+    @POSIX_EXECUTABLE_FIXTURE
     def test_approved_official_build_is_installed_checked_and_registered(self) -> None:
         archive = make_archive({"llama-b9999/llama-server": fake_server_script(), "llama-b9999/libggml.so": b"lib"})
         job = self.installer.start_install(self.plan(archive), run_async=False)
@@ -377,6 +383,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual((detected["installed"], detected["managed"], detected["version"]), (True, True, "4567 (abc1234)"))
         self.assertEqual([entry.name for entry in self.space.paths.engines.iterdir()], ["llama.cpp"])
 
+    @POSIX_EXECUTABLE_FIXTURE
     def test_cuda_runtime_archive_is_merged_into_the_program_folder(self) -> None:
         main = make_archive({"build/bin/llama-server": fake_server_script(), "build/bin/libggml-cuda.so": b"cuda"})
         runtime = make_archive({"libcudart.so.12": b"rt", "libcublas.so.12": b"blas"})
@@ -417,10 +424,14 @@ class EngineTests(unittest.TestCase):
         ):
             job = self.installer.start_install(self.plan(archive), run_async=False)
             self.assertEqual(job["state"], "failed")
-            self.assertIn("leaves its folder" if "evil" in str(job["log"]) else "unsafe path", job["error"])
+            self.assertTrue(
+                any(marker in job["error"] for marker in ("leaves its folder", "outside the destination", "unsafe path")),
+                job["error"],
+            )
         self.assertFalse((self.space.root / "agent" / "escape").exists())
         self.assertFalse((self.space.paths.engines / "llama.cpp").exists())
 
+    @POSIX_EXECUTABLE_FIXTURE
     def test_build_that_does_not_run_is_not_installed(self) -> None:
         broken = b"#!/bin/sh\necho 'llama-server: /lib/libc.so.6: version GLIBC_2.38 not found' >&2\nexit 1\n"
         job = self.installer.start_install(self.plan(make_archive({"x/llama-server": broken})), run_async=False)
@@ -428,6 +439,7 @@ class EngineTests(unittest.TestCase):
         self.assertIn("GLIBC_2.38", job["error"])
         self.assertFalse((self.space.paths.engines / "llama.cpp").exists())
 
+    @POSIX_EXECUTABLE_FIXTURE
     def test_failed_update_keeps_the_working_copy(self) -> None:
         good = make_archive({"llama-b9999/llama-server": fake_server_script("1000 (old)")})
         self.assertEqual(self.installer.start_install(self.plan(good), run_async=False)["state"], "succeeded")
@@ -438,6 +450,7 @@ class EngineTests(unittest.TestCase):
                                 capture_output=True, text=True, check=False).stdout
         self.assertIn("1000 (old)", output)
 
+    @POSIX_EXECUTABLE_FIXTURE
     def test_uninstall_removes_only_what_modelmatrix_installed(self) -> None:
         with self.assertRaises(HFAgentError) as refused:
             self.installer.uninstall()
@@ -457,6 +470,7 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(keep.is_dir())
         self.assertIsNone(self.registry.get("llama.cpp"))
 
+    @POSIX_EXECUTABLE_FIXTURE
     def test_live_log_can_be_read_from_a_position(self) -> None:
         archive = make_archive({"llama-b9999/llama-server": fake_server_script()})
         job = self.installer.start_install(self.plan(archive), run_async=False)
@@ -464,6 +478,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(later["log"], job["log"][2:])
         self.assertEqual(later["next"], len(job["log"]))
 
+    @POSIX_EXECUTABLE_FIXTURE
     def test_manual_llama_server_that_fails_is_reported_not_used(self) -> None:
         folder = self.space.home / ".local" / "bin"
         folder.mkdir(parents=True)
@@ -727,9 +742,15 @@ class ProfileTests(unittest.TestCase):
         values = self.host.profiles()["model-q4_k_m"]
         folder = self.space.paths.models / REPO
         self.assertEqual((values["PORT"], values["RUNTIME"], values["HF_DOWNLOAD_ID"]), ("8081", "llama.cpp", "dl-abc123def"))
-        self.assertEqual(values["MODEL_PATH"], str(folder / "Model-Q4_K_M.gguf"))
-        self.assertIn(f"--mmproj {folder / 'mmproj' / 'mmproj-F16.gguf'}", values["START_COMMAND"])
-        self.assertIn("LD_LIBRARY_PATH=/opt/llama/bin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}", values["START_COMMAND"])
+        self.assertEqual(Path(values["MODEL_PATH"]), folder / "Model-Q4_K_M.gguf")
+        if values.get("START_COMMAND_JSON"):
+            command = json.loads(values["START_COMMAND_JSON"])
+            self.assertEqual(Path(command[command.index("--mmproj") + 1]), folder / "mmproj" / "mmproj-F16.gguf")
+        else:
+            command = shlex.split(values["START_COMMAND"], posix=True)
+            self.assertEqual(Path(command[command.index("--mmproj") + 1]), folder / "mmproj" / "mmproj-F16.gguf")
+            if os.name != "nt":
+                self.assertIn("LD_LIBRARY_PATH=/opt/llama/bin${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}", values["START_COMMAND"])
 
     def test_names_models_and_ports_never_clash(self) -> None:
         self.host.folder.mkdir(parents=True)
@@ -761,6 +782,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual((job["profile_state"], self.host.started), ("needs_memory", []))
         self.assertIn("only 1.0 GB is free", job["profile_message"])
 
+    @unittest.skipUnless(os.name != "nt", "POSIX log path and Unix launch output; Windows lifecycle coverage uses native fixtures")
     def test_start_failure_shows_the_log_and_a_suggestion(self) -> None:
         self.alive = False
         self.answers = False
@@ -809,6 +831,7 @@ class ProfileTests(unittest.TestCase):
 
 
 class AgentIntegrationTests(unittest.TestCase):
+    @unittest.skipUnless(os.name != "nt", "/bin/bash integration fixture; Windows structured-launch coverage is native")
     def test_agent_reads_the_profile_and_the_start_command_runs_as_written(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

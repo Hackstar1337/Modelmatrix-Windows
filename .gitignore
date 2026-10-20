@@ -67,3 +67,10 @@ venv/
 
 # Windows generated distribution packages
 /dist-windows/
+
+# Runtime credentials/state must never enter a public source repository
+/secrets/
+/run/
+/Logs/
+/state/
+*.token

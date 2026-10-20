@@ -47,7 +47,7 @@ import { openHuggingFace } from "./HuggingFace";
 
 export function Header() {
   const { settings, update, online, info, bridge } = useApp();
-  const { bridgeLabel, localHostLabel } = usePlatform();
+  const { bridgeLabel, localHostLabel, capabilities } = usePlatform();
   return (
     <header className="topbar">
       <a className="brand" href="#/overview" aria-label="ModelMatrix overview">
@@ -59,7 +59,7 @@ export function Header() {
       </a>
       <div className="topbar-right">
         <DownloadsIndicator />
-        <button className="btn sm primary no-print" onClick={openOptimize} title={`Free memory on ${localHostLabel}`}>
+        <button className="btn sm primary no-print" onClick={openOptimize} disabled={capabilities.optimize === false} title={`Free memory on ${localHostLabel}`}>
           <Sparkles size={14} /> Optimize
         </button>
         <span className="conn no-print" title={info?.controller_url}>

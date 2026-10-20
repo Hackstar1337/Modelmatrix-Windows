@@ -24,6 +24,7 @@ export function openOptimize() {
 
 /** Mounted once in the app shell; renders the window while it is open. */
 export function OptimizeHost() {
+  const { capabilities } = usePlatform();
   const [open, setOpen] = useState(false);
   useEffect(() => {
     const show = () => setOpen(true);
@@ -36,7 +37,7 @@ export function OptimizeHost() {
     setOpen(false);
     if (/\/optimize\b/.test(window.location.hash)) history.replaceState(null, "", window.location.hash.replace(/\/optimize\b.*/, ""));
   };
-  return open ? <OptimizeModal onClose={close} /> : null;
+  return open && capabilities.optimize !== false ? <OptimizeModal onClose={close} /> : null;
 }
 
 type Preset = "maximum" | "recommended";
@@ -122,7 +123,9 @@ function OptimizeModal({ onClose }: { onClose: () => void }) {
 
   const choosePreset = (next: Preset) => {
     setPreset(next);
-    if (plan) setSelected(new Set(plan.presets[next]));
+    if (plan) {
+      setSelected(new Set(plan.presets[next].filter((id) => capabilities.purge_file_cache || plan.items.find((item) => item.id === id)?.kind !== "file_cache")));
+    }
   };
   const toggle = (id: string) =>
     setSelected((current) => {
@@ -148,7 +151,15 @@ function OptimizeModal({ onClose }: { onClose: () => void }) {
   const viewerApps = chosenApps.filter((a) => isViewerBrowser(a.name));
 
   const quitApps = async (apps: AppMemory[]) => {
-    const reply = await bridgeCommand("app.quit_apps", { apps: apps.map((a) => ({ path: a.path, name: a.name })) });
+    const reply = await bridgeCommand("app.quit_apps", {
+      apps: apps.map((a) => ({
+        path: a.path,
+        name: a.name,
+        ...(a.pid === undefined ? {} : { pid: a.pid }),
+        ...(a.creation_time === undefined ? {} : { creation_time: a.creation_time }),
+        ...(a.hwnd_ids === undefined ? {} : { hwnd_ids: a.hwnd_ids }),
+      })),
+    });
     const results = (Array.isArray(reply.result) ? reply.result : []) as QuitAppResult[];
     const sizes = Object.fromEntries(apps.map((a) => [a.path, a.bytes]));
     setSelectedApps((current) => {
@@ -319,7 +330,7 @@ function OptimizeModal({ onClose }: { onClose: () => void }) {
             </div>
             <div className="opt-list">
               {plan.items.map((item) => (
-                <ItemRow key={item.id} item={item} checked={!!selected?.has(item.id)} disabled={busy || (item.kind === "file_cache" && !capabilities.purge_file_cache)} onToggle={() => toggle(item.id)} />
+                <ItemRow key={item.id} item={item} checked={!!selected?.has(item.id)} disabled={busy || item.in_use || (item.kind === "file_cache" && !capabilities.purge_file_cache)} onToggle={() => toggle(item.id)} />
               ))}
               {plan.items.some((item) => item.kind === "file_cache") && !capabilities.purge_file_cache && (
                 <Notice kind="info">File-cache purge is unavailable on {platform.display_name}. Model and server cleanup remains available; this dashboard will not claim to clear system cache.</Notice>
@@ -475,7 +486,11 @@ const SEGMENTS: { key: keyof MemorySnapshot; label: string; className: string }[
 ];
 
 function MemoryBar({ memory }: { memory: MemorySnapshot }) {
+  const { isWindows } = usePlatform();
   const total = memory.total_bytes || 1;
+  const segments = isWindows
+    ? [{ key: "app_bytes" as const, label: "Used", className: "app" }, { key: "free_bytes" as const, label: "Free", className: "free" }]
+    : SEGMENTS;
   return (
     <div className="opt-memory">
       <div className="opt-memory-head">
@@ -487,17 +502,17 @@ function MemoryBar({ memory }: { memory: MemorySnapshot }) {
         </span>
       </div>
       <div className="opt-bar" aria-hidden>
-        {SEGMENTS.map((s) => (
+        {segments.map((s) => (
           <i key={s.key} className={s.className} style={{ width: `${((memory[s.key] as number) / total) * 100}%` }} />
         ))}
       </div>
       <div className="legend opt-legend">
-        {SEGMENTS.map((s) => (
+        {segments.map((s) => (
           <span key={s.key}>
             <i className={`opt-dot ${s.className}`} /> {s.label} <b className="mono">{bytes(memory[s.key] as number)}</b>
           </span>
         ))}
-        {memory.swap_used_bytes > 0 && (
+        {!isWindows && memory.swap_used_bytes !== undefined && memory.swap_used_bytes > 0 && (
           <span>
             Swap <b className="mono">{bytes(memory.swap_used_bytes)}</b>
           </span>
