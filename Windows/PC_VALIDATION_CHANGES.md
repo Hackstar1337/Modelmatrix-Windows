@@ -17,3 +17,5 @@ This pass starts from public revision `88be941` and uses a fresh local checkout 
 Added PC controller, HF, bridge, native desktop, distribution, portable relocation/profile safety, Dashboard totals, and live HTTP/schema regressions. Tests explicitly distinguish real network/native execution from deterministic fixtures. A blocked external account or ownership-unidentifiable Explorer window is not represented as passing.
 
 The complete PC report and runnable bundle are generated outside this source tree, under the selected task's outputs directory. No runtime credentials, captured prompts, user client configuration, QA databases, model weights or engine binaries are committed to this source checkout.
+
+Final relocation also reproduced a Windows redirected-output code-page failure in Doctor.cmd. Portable CLI results and errors now use lossless ASCII-safe JSON escapes; the Unicode-path/native model execution itself was already working. A maintained redirected-stdout regression covers this repair.

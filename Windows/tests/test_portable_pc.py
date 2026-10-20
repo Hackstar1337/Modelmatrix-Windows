@@ -40,4 +40,17 @@ class PortablePCTests(unittest.TestCase):
             with self.assertRaises(ValueError):pc.configure_profiles(root,{'model':{'path':'Models/model'},'engines':{'cpu':{'path':'Runtime/server'}}},pc.settings(root))
             self.assertEqual(json.loads(profile.read_text())['REQUEST_MODEL'],'user')
 
+    def test_unicode_diagnostics_are_lossless_on_ascii_redirected_stdout(self):
+        from unittest import mock
+        class ASCIIPipe:
+            def __init__(self):self.parts=[]
+            def write(self,text):text.encode('ascii');self.parts.append(text)
+            def flush(self):pass
+        output=ASCIIPipe()
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(pc,'read_json',return_value={}),mock.patch.object(pc,'doctor',return_value={'path':'folder Ω'}),mock.patch.object(sys,'stdout',output):
+                code=pc.main(['doctor','--root',d])
+        self.assertEqual(code,0)
+        self.assertEqual(json.loads(''.join(output.parts))['path'],'folder Ω')
+
 if __name__=='__main__':unittest.main()

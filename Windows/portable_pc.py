@@ -167,9 +167,9 @@ def main(argv: list[str] | None=None) -> int:
             else:raise RuntimeError('Small-model readiness timeout; inspect model logs')
             public=config['model_port']+(1 if config['backend']=='vulkan' else 0)
             result=request(f'http://127.0.0.1:{public}','/v1/chat/completions',{'model':'smollm2-135m','messages':[{'role':'user','content':'What is the capital of France? Answer briefly.'}],'temperature':0,'max_tokens':48},timeout=60)
-        print(json.dumps(result,ensure_ascii=False,indent=2));return 0
+        print(json.dumps(result,ensure_ascii=True,indent=2));return 0
     except (OSError,ValueError,RuntimeError,KeyError,subprocess.SubprocessError) as error:
-        print(json.dumps({'ok':False,'error':str(error)},ensure_ascii=False),file=sys.stderr);return 1
+        print(json.dumps({'ok':False,'error':str(error)},ensure_ascii=True),file=sys.stderr);return 1
 
 
 if __name__=='__main__':raise SystemExit(main())
