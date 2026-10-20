@@ -68,7 +68,20 @@ if (-not $SkipDashboard) {
 }
 $previousCompileRoot = $env:MODELMATRIX_COMPILE_ROOT
 $env:MODELMATRIX_COMPILE_ROOT = $SourceRoot
-try { & $python[0] @($python | Select-Object -Skip 1) -c 'import os,pathlib; root=pathlib.Path(os.environ["MODELMATRIX_COMPILE_ROOT"]); [compile(p.read_text(encoding="utf-8"), str(p), "exec") for p in root.rglob("*.py") if "__pycache__" not in p.parts]' }
-finally { if ($null -eq $previousCompileRoot) { Remove-Item Env:MODELMATRIX_COMPILE_ROOT -ErrorAction SilentlyContinue } else { $env:MODELMATRIX_COMPILE_ROOT = $previousCompileRoot } }
+ $compileScript = Join-Path ([IO.Path]::GetTempPath()) ('ModelMatrix-compile-' + [guid]::NewGuid().ToString('N') + '.py')
+@'
+import os
+import pathlib
+
+root = pathlib.Path(os.environ["MODELMATRIX_COMPILE_ROOT"])
+for path in root.rglob("*.py"):
+    if "__pycache__" not in path.parts:
+        compile(path.read_text(encoding="utf-8"), str(path), "exec")
+'@ | Set-Content -LiteralPath $compileScript -Encoding UTF8
+try { $pythonCommand = @($python); & $pythonCommand[0] @($pythonCommand | Select-Object -Skip 1) $compileScript }
+finally {
+    Remove-Item -LiteralPath $compileScript -Force -ErrorAction SilentlyContinue
+    if ($null -eq $previousCompileRoot) { Remove-Item Env:MODELMATRIX_COMPILE_ROOT -ErrorAction SilentlyContinue } else { $env:MODELMATRIX_COMPILE_ROOT = $previousCompileRoot }
+}
 if ($LASTEXITCODE -ne 0) { throw 'Python source compilation failed.' }
 Write-Output (ConvertTo-Json @{ ok = $true; source = $SourceRoot; dashboard = (-not $SkipDashboard); python = $version.Trim() } -Compress)

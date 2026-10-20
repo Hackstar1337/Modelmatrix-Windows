@@ -513,7 +513,9 @@ class UsageModule:
             hs={}
             for r in rows: hs.setdefault(r.get("host") or "local",[]).append(r)
             summary=self._summary(rows,range_key); summary["previous"]=self._previous(range_key,tier,host)
-            return 200,{"summary":summary,"totals":self._summary(allrows,"all")|{"requests_24h":self._summary([self._norm(x) for x in self._rows("24h",tier,host)],"24h")["requests"],"tokens_24h":self._summary([self._norm(x) for x in self._rows("24h",tier,host)],"24h")["total_tokens"],"active_clients":len({x.get("client_id") for x in allrows if (x.get("started_at") or 0)>time.time()-300}),"requests_per_minute":self._summary([self._norm(x) for x in self._rows("1h",tier,host)],"1h")["requests"]/60},"host_stats":[{"host":h,"requests":len(v),"last_request":max(x.get("started_at") or 0 for x in v)} for h,v in hs.items()],"timeseries":self._timeseries(rows,range_key),"models":self._models(rows),"clients":self._clients(rows)[:12],"recent":[self._norm(x) for x in self._rows(range_key,tier,host,limit=30)],"in_flight":relay.inflight_rows(),"last_id":relay.store.count(),"hosts":sorted(hs),"relay":relay.status(),"generated_at":time.time()}
+            totals=self._summary(allrows,"all")
+            totals["tokens"]=totals["total_tokens"]
+            return 200,{"summary":summary,"totals":totals|{"requests_24h":self._summary([self._norm(x) for x in self._rows("24h",tier,host)],"24h")["requests"],"tokens_24h":self._summary([self._norm(x) for x in self._rows("24h",tier,host)],"24h")["total_tokens"],"active_clients":len({x.get("client_id") for x in allrows if (x.get("started_at") or 0)>time.time()-300}),"requests_per_minute":self._summary([self._norm(x) for x in self._rows("1h",tier,host)],"1h")["requests"]/60},"host_stats":[{"host":h,"requests":len(v),"last_request":max(x.get("started_at") or 0 for x in v)} for h,v in hs.items()],"timeseries":self._timeseries(rows,range_key),"models":self._models(rows),"clients":self._clients(rows)[:12],"recent":[self._norm(x) for x in self._rows(range_key,tier,host,limit=30)],"in_flight":relay.inflight_rows(),"last_id":relay.store.count(),"hosts":sorted(hs),"relay":relay.status(),"generated_at":time.time()}
         if path=="/api/usage/summary" and method=="GET":
             value=self._summary(rows,range_key); value["previous"]=self._previous(range_key,tier,host)
             return 200,value
@@ -1123,6 +1125,12 @@ class DashboardHandler(AgentRequestHandler):
         except AgentError as error: self._send_json_local(error.http_status, {"error": error.code, "message": error.public_message})
         except (ValueError, OSError) as error: self._send_json_local(500, {"error": "internal_error", "message": str(error)})
 
+    def do_PUT(self) -> None:  # noqa: N802
+        if not self._host_allowed(): self._send_json_local(421, {"error": "invalid_host", "message": "invalid Host header"}); return
+        try: self._handle_local("PUT")
+        except AgentError as error: self._send_json_local(error.http_status, {"error": error.code, "message": error.public_message})
+        except (ValueError, OSError) as error: self._send_json_local(500, {"error": "internal_error", "message": str(error)})
+
     def do_DELETE(self) -> None:  # noqa: N802
         if not self._host_allowed(): self._send_json_local(421, {"error": "invalid_host", "message": "invalid Host header"}); return
         try: self._handle_local("DELETE")
@@ -1160,7 +1168,10 @@ class LocalHTTPServer(ThreadingHTTPServer):
                 self._connections.discard(request)
 
     def handle_error(self, request: socket.socket, client_address: Any) -> None:
-        if self._shutdown_started and isinstance(sys.exc_info()[1], OSError):
+        error = sys.exc_info()[1]
+        if isinstance(error, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+            return  # browsers and streaming clients may disconnect normally
+        if self._shutdown_started and isinstance(error, OSError):
             return  # cancelling an in-flight socket is normal during shutdown
         super().handle_error(request, client_address)
 

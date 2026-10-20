@@ -155,6 +155,112 @@ def _is_system_path(path: str) -> bool:
     return normalized == windows or normalized.startswith(windows + "\\")
 
 
+CF_UNICODETEXT = 13
+GMEM_MOVEABLE = 0x0002
+
+
+def clipboard_text() -> str | None:
+    """Read CF_UNICODETEXT without changing any clipboard format."""
+    if not IS_WINDOWS:
+        return None
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32.OpenClipboard.argtypes = [HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+    user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
+    user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
+    user32.GetClipboardData.argtypes = [wintypes.UINT]
+    user32.GetClipboardData.restype = HANDLE
+    kernel32.GlobalLock.argtypes = [HANDLE]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [HANDLE]
+    kernel32.GlobalUnlock.restype = wintypes.BOOL
+    if not user32.OpenClipboard(None):
+        return None
+    try:
+        if not user32.IsClipboardFormatAvailable(CF_UNICODETEXT):
+            return None
+        handle = user32.GetClipboardData(CF_UNICODETEXT)
+        if not handle:
+            return None
+        pointer = kernel32.GlobalLock(handle)
+        if not pointer:
+            return None
+        try:
+            return ctypes.wstring_at(pointer)
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+
+
+def set_clipboard_text(value: str) -> bool:
+    """Set text only when every existing clipboard format is Unicode text.
+
+    A non-text clipboard (image, file drop, HTML, etc.) is left untouched. The
+    caller owns any backup/restore policy; this function only performs the
+    conservative format check and native allocation.
+    """
+    if not IS_WINDOWS or not isinstance(value, str):
+        return False
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32.OpenClipboard.argtypes = [HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+    user32.EnumClipboardFormats.argtypes = [wintypes.UINT]
+    user32.EnumClipboardFormats.restype = wintypes.UINT
+    user32.EmptyClipboard.argtypes = []
+    user32.EmptyClipboard.restype = wintypes.BOOL
+    user32.SetClipboardData.argtypes = [wintypes.UINT, HANDLE]
+    user32.SetClipboardData.restype = HANDLE
+    kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = HANDLE
+    kernel32.GlobalLock.argtypes = [HANDLE]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [HANDLE]
+    kernel32.GlobalUnlock.restype = wintypes.BOOL
+    kernel32.GlobalFree.argtypes = [HANDLE]
+    kernel32.GlobalFree.restype = HANDLE
+    if not user32.OpenClipboard(None):
+        return False
+    handle = None
+    try:
+        formats: list[int] = []
+        current = 0
+        while True:
+            current = int(user32.EnumClipboardFormats(current))
+            if not current:
+                break
+            formats.append(current)
+        if any(fmt != CF_UNICODETEXT for fmt in formats):
+            return False
+        encoded = (value + "\0").encode("utf-16-le")
+        handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
+        if not handle:
+            return False
+        pointer = kernel32.GlobalLock(handle)
+        if not pointer:
+            kernel32.GlobalFree(handle)
+            handle = None
+            return False
+        ctypes.memmove(pointer, encoded, len(encoded))
+        kernel32.GlobalUnlock(handle)
+        if not user32.EmptyClipboard() or not user32.SetClipboardData(CF_UNICODETEXT, handle):
+            kernel32.GlobalFree(handle)
+            handle = None
+            return False
+        handle = None  # ownership transferred to the clipboard
+        return True
+    finally:
+        if handle:
+            kernel32.GlobalFree(handle)
+        user32.CloseClipboard()
+
+
 def inventory_apps() -> list[dict[str, Any]]:
     """Enumerate visible user application windows with stable process identity."""
     api = _apis()
@@ -178,7 +284,11 @@ def inventory_apps() -> list[dict[str, Any]]:
             if not title:
                 return True
             identity = _window_identity(hwnd, api)
-            if not identity or identity["pid"] == own_pid or _is_system_path(identity["path"]):
+            # Explorer is the user-facing folder app and must remain
+            # controllable; other binaries under the Windows directory are
+            # still excluded from the optimize/quit inventory.
+            is_explorer = Path(identity["path"]).name.casefold() == "explorer.exe"
+            if not identity or identity["pid"] == own_pid or (_is_system_path(identity["path"]) and not is_explorer):
                 return True
             key = (identity["path"].casefold(), identity["pid"], identity["creation_time"])
             row = rows.setdefault(key, {"title": title, "name": Path(identity["path"]).stem or identity["path"], "hwnd_ids": [], **identity})
@@ -218,6 +328,18 @@ def close_apps(apps: list[dict[str, Any]], *, timeout: float = 8.0) -> list[dict
             if not actuals or any(not actual or (expected_pid and actual["pid"] != expected_pid) or (expected_creation and actual["creation_time"] != expected_creation) or actual["path"].casefold() != path.casefold() for actual in actuals):
                 results.append(result)
                 continue
+            # Explorer and other shell-hosted applications may expose several
+            # visible top-level windows from one PID.  Inventory rows retain
+            # all HWNDs for display, but a close request must be narrowed to
+            # the positively selected title instead of closing every window
+            # owned by that process.  The title is deliberately checked after
+            # PID/creation/image identity so a reused HWND cannot pass alone.
+            requested_title = str(requested.get("title") or "").strip()
+            if requested_title:
+                actuals = [actual for actual in actuals if _title(HWND(actual["hwnd"]), api) == requested_title]
+                if not actuals:
+                    results.append(result)
+                    continue
             visible = [actual for actual in actuals if api["IsWindowVisible"](HWND(actual["hwnd"]))]
             if not visible:
                 result.update(status="still_open", message="The application window is no longer visible.")

@@ -87,15 +87,15 @@ export function HuggingFaceSettingsSection() {
       <div className="setting-row">
         <div>
           <div className="title">Speed limit</div>
-          <div className="desc">Megabytes per second for all downloads together. 0 means no limit.</div>
+          <div className="desc">Megabits per second for all downloads together. 0 means no limit.</div>
         </div>
         <div className="row">
-          <input className="input mono" aria-label="Speed limit in MB per second" style={{ width: 90 }} value={speed} onChange={(e) => setSpeed(e.target.value.replace(/\D/g, ""))} />
-          <span className="muted">MB/s</span>
+          <input className="input mono" aria-label="Speed limit in megabits per second" style={{ width: 90 }} value={speed} onChange={(e) => setSpeed(e.target.value.replace(/\D/g, ""))} />
+          <span className="muted">Mbit/s</span>
           <button
             className="btn sm primary"
             disabled={busy === "speed_limit_mbps" || Number(speed || 0) === settings.speed_limit_mbps}
-            onClick={() => save({ speed_limit_mbps: Number(speed || 0) }, Number(speed || 0) ? `Limited to ${speed} MB/s` : "No speed limit")}
+            onClick={() => save({ speed_limit_mbps: Number(speed || 0) }, Number(speed || 0) ? `Limited to ${speed} Mbit/s` : "No speed limit")}
           >
             Save
           </button>

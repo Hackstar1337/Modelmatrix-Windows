@@ -645,7 +645,10 @@ class LocalHF:
         settings = self._settings()
         endpoint = settings["endpoint_in_use"]
         token = self._token()
-        metadata = self._request_json(f"{endpoint}/api/models/{urllib.parse.quote(repo, safe='/')}?blobs=true", token)
+        repo_url = f"{endpoint}/api/models/{urllib.parse.quote(repo, safe='/')}"
+        if revision != "main":
+            repo_url += "/revision/" + urllib.parse.quote(revision, safe="")
+        metadata = self._request_json(repo_url + "?blobs=true", token)
         metadata = metadata if isinstance(metadata, dict) else {}
         pinned = str(metadata.get("sha") or "")
         resolved_revision = pinned if re.fullmatch(r"[0-9a-fA-F]{40}", pinned) else revision
@@ -662,9 +665,12 @@ class LocalHF:
             if not isinstance(path, str) or not path.lower().endswith(".gguf"):
                 continue
             size = _file_size(item)
-            if not size and isinstance(item.get("lfs"), dict):
-                size = _file_size(item["lfs"])
-            record = {"path": path, "size": size, "sha256": _sha(item.get("sha256")) or _sha((item.get("lfs") or {}).get("sha256"))}
+            lfs = item.get("lfs") if isinstance(item.get("lfs"), dict) else {}
+            if not size:
+                size = _file_size(lfs)
+            # Hub tree entries use lfs.oid; model-info blobs use lfs.sha256.
+            # Do not accept the outer 40-character Git blob OID as a file hash.
+            record = {"path": path, "size": size, "sha256": _sha(item.get("sha256")) or _sha(lfs.get("sha256")) or _sha(lfs.get("oid"))}
             if size > 0 and _is_projector(path):
                 projectors.append(record)
             elif size > 0:

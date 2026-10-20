@@ -154,7 +154,12 @@ else:
             if not user32.RegisterClassExW(ctypes.byref(wc)) and ctypes.get_last_error() != 1410: raise ctypes.WinError()
             self.hwnd = user32.CreateWindowExW(0, cls_name, "ModelMatrix", 0, 0, 0, 0, 0, None, None, instance, None)
             if not self.hwnd: raise ctypes.WinError()
-            self._rebuild_menu(); data = NOTIFYICONDATAW(); data.cbSize = ctypes.sizeof(data); data.hWnd = self.hwnd; data.uID = 1; data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP; data.uCallbackMessage = WM_TRAY; data.hIcon = user32.LoadIconW(None, ctypes.c_void_p(32512)); data.szTip = "ModelMatrix"; shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(data))
+            self._rebuild_menu(); data = NOTIFYICONDATAW(); data.cbSize = ctypes.sizeof(data); data.hWnd = self.hwnd; data.uID = 1; data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP; data.uCallbackMessage = WM_TRAY; data.hIcon = user32.LoadIconW(None, ctypes.c_void_p(32512)); data.szTip = "ModelMatrix"
+            if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(data)):
+                user32.DestroyWindow(self.hwnd); self.hwnd = None
+                if self.menu: user32.DestroyMenu(self.menu); self.menu = None
+                if self._mutex: kernel32.CloseHandle(self._mutex); self._mutex = None
+                raise ctypes.WinError(ctypes.get_last_error() or 1)
             if not self.no_browser: webbrowser.open(_endpoint())
             msg = wintypes.MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0: user32.TranslateMessage(ctypes.byref(msg)); user32.DispatchMessageW(ctypes.byref(msg))
